@@ -2,7 +2,33 @@ import copy
 import functools
 import os
 
-import blobfile as bf
+try:
+    import blobfile as bf
+except Exception:
+    import os as _os
+    class _LocalBF:
+        @staticmethod
+        def join(a, b):
+            return _os.path.join(a, b)
+        @staticmethod
+        def dirname(p):
+            return _os.path.dirname(p)
+        @staticmethod
+        def exists(p):
+            return _os.path.exists(p)
+        class BlobFile:
+            def __init__(self, path, mode):
+                self.path = path
+                self.mode = mode
+                self.f = None
+            def __enter__(self):
+                self.f = open(self.path, self.mode)
+                return self.f
+            def __exit__(self, exc_type, exc, tb):
+                if self.f:
+                    self.f.close()
+    bf = _LocalBF()
+
 import torch as th
 import torch.distributed as dist
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
@@ -76,6 +102,11 @@ class TrainLoop:
 
         self.step = 0
         self.resume_step = 0
+        self.epoch = 0
+        try:
+            self.steps_per_epoch = len(self.dataloader)
+        except Exception:
+            self.steps_per_epoch = None
         self.global_batch = self.batch_size * dist.get_world_size()
 
         self.sync_cuda = th.cuda.is_available()
@@ -180,6 +211,7 @@ class TrainLoop:
             except StopIteration:
                     # StopIteration is thrown if dataset ends
                     # reinitialize data loader
+                    self.epoch += 1
                     data_iter = iter(self.dataloader)
                     batch, cond, name = next(data_iter)
 
@@ -248,12 +280,19 @@ class TrainLoop:
             losses = losses1[0]
             sample = losses1[1]
 
-            loss = (losses["loss"] * weights + losses['loss_cal'] * 10).mean()
+            total_loss = (losses["loss"] * weights + losses['loss_cal'] * 10).mean()
 
             log_loss_dict(
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}
             )
-            self.mp_trainer.backward(loss)
+            # Also log the combined total loss explicitly
+            logger.logkv_mean("total_loss", total_loss.item())
+            # Log learning rate
+            try:
+                logger.logkv("lr", self.opt.param_groups[0]["lr"])
+            except Exception:
+                pass
+            self.mp_trainer.backward(total_loss)
             for name, param in self.ddp_model.named_parameters():
                 if param.grad is None:
                     print(name)
@@ -273,6 +312,8 @@ class TrainLoop:
 
     def log_step(self):
         logger.logkv("step", self.step + self.resume_step)
+        if self.steps_per_epoch:
+            logger.logkv("epoch", self.epoch)
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
 
     def save(self):

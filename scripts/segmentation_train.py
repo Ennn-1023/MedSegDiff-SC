@@ -1,11 +1,10 @@
-
 import sys
 import argparse
 sys.path.append("../")
 sys.path.append("./")
 from guided_diffusion import dist_util, logger
 from guided_diffusion.resample import create_named_schedule_sampler
-from guided_diffusion.bratsloader import BRATSDataset, BRATSDataset3D
+from guided_diffusion.bratsloader import BRATSDataset3D
 from guided_diffusion.isicloader import ISICDataset
 from guided_diffusion.custom_dataset_loader import CustomDataset,CustomDataset3D
 from guided_diffusion.script_util import (
@@ -17,15 +16,19 @@ from guided_diffusion.script_util import (
 import torch as th
 from pathlib import Path
 from guided_diffusion.train_util import TrainLoop
-from visdom import Visdom
-viz = Visdom(port=8850)
+try:
+    from visdom import Visdom
+    viz = Visdom(port=8850)
+except Exception:
+    viz = None
 import torchvision.transforms as transforms
 
 def main():
     args = create_argparser().parse_args()
 
     dist_util.setup_dist(args)
-    logger.configure(dir = args.out_dir)
+    # Configure logger with stdout, log file, csv, and tensorboard
+    logger.configure(dir = args.out_dir, format_strs=["stdout","log","csv","tensorboard"])
 
     logger.log("creating data loader...")
 
@@ -41,11 +44,11 @@ def main():
 
         ds = BRATSDataset3D(args.data_dir, transform_train, test_flag=False)
         args.in_ch = 5
-    elif any(Path(args.data_dir).glob("*\*.nii.gz")):
+    elif any(Path(args.data_dir).glob("*\\*.nii.gz")):
         tran_list = [transforms.Resize((args.image_size,args.image_size)),]
         transform_train = transforms.Compose(tran_list)
         print("Your current directory : ",args.data_dir)
-        ds = CustomDataset3D(args, args.data_dir, transform_train)
+        ds = CustomDataset3D(args.data_dir, transform_train)
         args.in_ch = 4
     else:
         tran_list = [transforms.Resize((args.image_size,args.image_size)), transforms.ToTensor(),]

@@ -9,3 +9,5 @@ matplotlib
 batchgenerators
 visdom
 torchsummary
+tensorboard
+torchvision
