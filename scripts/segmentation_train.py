@@ -21,6 +21,9 @@ from guided_diffusion.train_util import TrainLoop
 # viz = Visdom(port=8850)
 import torchvision.transforms as transforms
 
+import os
+os.environ["CUDA_LAUNCH_BLOCKING"]="1"
+
 def main():
     args = create_argparser().parse_args()
 
