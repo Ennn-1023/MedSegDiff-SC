@@ -16,13 +16,15 @@ from guided_diffusion.script_util import (
 import torch as th
 from pathlib import Path
 from guided_diffusion.train_util import TrainLoop
-try:
-    from visdom import Visdom
-    viz = Visdom(port=8850)
-except Exception:
-    viz = None
+# try:
+#     from visdom import Visdom
+#     viz = Visdom(port=8850)
+# except Exception:
+#     viz = None
 import torchvision.transforms as transforms
-
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 def main():
     args = create_argparser().parse_args()
 
@@ -72,8 +74,30 @@ def main():
         model = th.nn.DataParallel(model,device_ids=[int(id) for id in args.multi_gpu.split(',')])
         model.to(device = th.device('cuda', int(args.gpu_dev)))
     else:
-        device = th.device('cuda:0' if args.gpu_dev else 'cpu')
-        model.to(device=device)
+        # Robust single-device selection with OOM fallback
+        if th.cuda.is_available() and str(args.gpu_dev) not in ("", "cpu"):
+            try:
+                dev_index = int(str(args.gpu_dev)) if str(args.gpu_dev).isdigit() else 0
+                device = th.device(f'cuda:{dev_index}')
+            except Exception:
+                device = th.device('cuda:0')
+        else:
+            device = th.device('cpu')
+        try:
+            model.to(device=device)
+        except RuntimeError as e:
+            if 'out of memory' in str(e).lower():
+                logger.warn("CUDA out of memory when moving model to GPU. Falling back to CPU. "
+                            "Consider reducing --num_channels, --image_size, enabling --use_checkpoint or --use_fp16, "
+                            "or using a smaller batch size.")
+                try:
+                    th.cuda.empty_cache()
+                except Exception:
+                    pass
+                device = th.device('cpu')
+                model.to(device=device)
+            else:
+                raise
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion,  maxt=args.diffusion_steps)
 
 
