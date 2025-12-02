@@ -17,8 +17,8 @@ from guided_diffusion.script_util import (
 import torch as th
 from pathlib import Path
 from guided_diffusion.train_util import TrainLoop
-from visdom import Visdom
-viz = Visdom(port=8850)
+# from visdom import Visdom
+# viz = Visdom(port=8850)
 import torchvision.transforms as transforms
 
 def main():
@@ -85,7 +85,7 @@ def main():
         lr=args.lr,
         ema_rate=args.ema_rate,
         log_interval=args.log_interval,
-        save_interval=args.save_interval,
+        except RuntimeError as e:
         resume_checkpoint=args.resume_checkpoint,
         use_fp16=args.use_fp16,
         fp16_scale_growth=args.fp16_scale_growth,
