@@ -72,7 +72,8 @@ def main():
         model = th.nn.DataParallel(model,device_ids=[int(id) for id in args.multi_gpu.split(',')])
         model.to(device = th.device('cuda', int(args.gpu_dev)))
     else:
-        model.to(dist_util.dev())
+        device = th.device('cuda:0' if args.gpu_dev else 'cpu')
+        model.to(device=device)
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion,  maxt=args.diffusion_steps)
 
 
