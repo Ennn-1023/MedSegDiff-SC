@@ -2832,7 +2832,7 @@ class UNetModel_v1sc(nn.Module):
                     # 2. DenseHint 路径：为每个 encoder 阶段建立空间卷积
                     self.dense_hint_blocks = nn.ModuleList()
                     # 构建 stride 列表（根据是否 downsample）
-                    stride_list = []
+                    stride_list = [1]  # ✅ 初始 conv block 的 stride
                     for level, mult in enumerate(channel_mult):
                         for _ in range(num_res_blocks):
                             stride_list.append(1)
