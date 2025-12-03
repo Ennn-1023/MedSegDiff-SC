@@ -2736,6 +2736,9 @@ class UNetModel_v1sc(nn.Module):
         )
         self._feature_size += ch
 
+        # ✅ 保存 encoder 通道列表（在 decoder 构建之前）
+        self._encoder_block_chans = list(input_block_chans)  # 复制一份
+
         self.output_blocks = nn.ModuleList([])
         self._decoder_skip_chans = [] # record skip channels per decoder stage
         # 使用 encoder 阶段的 input_block_chans, ch, ds（不要重新初始化）
@@ -2794,77 +2797,87 @@ class UNetModel_v1sc(nn.Module):
         if high_way:
             features = 32
             self.hwm = Generic_UNet(self.in_channels - 1, features, 1, 5, highway=True)
-        pre_hint_in_channels = max(1, in_channels - 1)
+
+        # ==================== 创建 control_block 包装 CSCTuner ====================
         use_csc_tuner = True
-        csc_use_layers = None
-        csc_down_ratio = 1.0
         if use_csc_tuner:
-            pre_hint_in_channels = max(1, in_channels - 1)  # 控制輸入通道數（排除最後一個通道）
-            csc_pre_hint_out_channels = 256
-            # 1. PreHint 路徑：提取全域特徵
-            ch = csc_pre_hint_out_channels
-            pre_hint_dim_ratio = 1.0
-            self.pre_hint_blocks = nn.Sequential(
-                conv_nd(dims, pre_hint_in_channels, int(16 * pre_hint_dim_ratio), 3, padding=1),
-                nn.SiLU(),
-                conv_nd(dims, int(16 * pre_hint_dim_ratio), int(16 * pre_hint_dim_ratio), 3, padding=1),
-                nn.SiLU(),
-                conv_nd(dims, int(16 * pre_hint_dim_ratio), int(32 * pre_hint_dim_ratio), 3, padding=1, stride=2),
-                nn.SiLU(),
-                conv_nd(dims, int(32 * pre_hint_dim_ratio), int(32 * pre_hint_dim_ratio), 3, padding=1),
-                nn.SiLU(),
-                conv_nd(dims, int(32 * pre_hint_dim_ratio), int(96 * pre_hint_dim_ratio), 3, padding=1, stride=2),
-                nn.SiLU(),
-                conv_nd(dims, int(96 * pre_hint_dim_ratio), int(96 * pre_hint_dim_ratio), 3, padding=1),
-                nn.SiLU(),
-                conv_nd(dims, int(96 * pre_hint_dim_ratio), ch, 3, padding=1, stride=2),
-            )
+            # 定义内部 ControlBlock 类
+            class _CSCControlBlock(nn.Module):
+                def __init__(self, in_channels, encoder_chans, decoder_chans, channel_mult, num_res_blocks, dims, dense_hint_kernel=3, down_ratio=1.0):
+                    super().__init__()
+                    self.scale = 1.0  # 用于控制信号缩放
 
-            # 2. DenseHint 路徑：為每個 encoder 階段建立空間卷積
-            self.dense_hint_blocks = nn.ModuleList()
-            # 建構 stride 列表（根據是否 downsample）
-            stride_list = []
-            for level, mult in enumerate(channel_mult):
-                for _ in range(num_res_blocks):
-                    stride_list.append(1)
-                if level != len(channel_mult) - 1:  # 非最後一層才有 downsample
-                    stride_list.append(2)
+                    pre_hint_in_channels = max(1, in_channels - 1)
+                    csc_pre_hint_out_channels = 256
+                    pre_hint_dim_ratio = 1.0
 
-            # 為每個 input_block 建立對應的 dense hint
-            ch_hint = csc_pre_hint_out_channels
-            for i, chan in enumerate(input_block_chans):
-                if csc_use_layers is not None and i not in csc_use_layers:
-                    self.dense_hint_blocks.append(nn.Identity())
-                    continue
-
-                padding = 1 if csc_dense_hint_kernel == 3 else 0
-                self.dense_hint_blocks.append(
-                    nn.Sequential(
+                    # 1. PreHint 路径：提取全局特征
+                    ch = csc_pre_hint_out_channels
+                    self.pre_hint_blocks = nn.Sequential(
+                        conv_nd(dims, pre_hint_in_channels, int(16 * pre_hint_dim_ratio), 3, padding=1),
                         nn.SiLU(),
-                        zero_module(
-                            conv_nd(dims, ch_hint, chan, csc_dense_hint_kernel,
-                                    padding=padding, stride=stride_list[i])
-                        )
+                        conv_nd(dims, int(16 * pre_hint_dim_ratio), int(16 * pre_hint_dim_ratio), 3, padding=1),
+                        nn.SiLU(),
+                        conv_nd(dims, int(16 * pre_hint_dim_ratio), int(32 * pre_hint_dim_ratio), 3, padding=1, stride=2),
+                        nn.SiLU(),
+                        conv_nd(dims, int(32 * pre_hint_dim_ratio), int(32 * pre_hint_dim_ratio), 3, padding=1),
+                        nn.SiLU(),
+                        conv_nd(dims, int(32 * pre_hint_dim_ratio), int(96 * pre_hint_dim_ratio), 3, padding=1, stride=2),
+                        nn.SiLU(),
+                        conv_nd(dims, int(96 * pre_hint_dim_ratio), int(96 * pre_hint_dim_ratio), 3, padding=1),
+                        nn.SiLU(),
+                        conv_nd(dims, int(96 * pre_hint_dim_ratio), ch, 3, padding=1, stride=2),
                     )
-                )
-                ch_hint = chan  # 下一層的輸入通道數
 
-            # 3. LSCTuner 路徑：為每個 decoder 的 skip connection 建立適配器
-            self.lsc_tuner_blocks = nn.ModuleList()
-            # 注意：decoder 的通道數是反序的
-            for i, skip_chan in enumerate(self._decoder_skip_chans):
-                if csc_use_layers is not None and i not in csc_use_layers:
-                    self.lsc_tuner_blocks.append(nn.Identity())
-                    continue
-                from .SCTuner import SCTuner
-                tuner_length = int(skip_chan * csc_down_ratio)
-                self.lsc_tuner_blocks.append(
-                    SCTuner(dim=skip_chan, tuner_length=tuner_length)
-                )
+                    # 2. DenseHint 路径：为每个 encoder 阶段建立空间卷积
+                    self.dense_hint_blocks = nn.ModuleList()
+                    # 构建 stride 列表（根据是否 downsample）
+                    stride_list = []
+                    for level, mult in enumerate(channel_mult):
+                        for _ in range(num_res_blocks):
+                            stride_list.append(1)
+                        if level != len(channel_mult) - 1:
+                            stride_list.append(2)
+
+                    # 为每个 input_block 建立对应的 dense hint
+                    ch_hint = csc_pre_hint_out_channels
+                    for i, chan in enumerate(encoder_chans):
+                        padding = 1 if dense_hint_kernel == 3 else 0
+                        self.dense_hint_blocks.append(
+                            nn.Sequential(
+                                nn.SiLU(),
+                                zero_module(
+                                    conv_nd(dims, ch_hint, chan, dense_hint_kernel,
+                                            padding=padding, stride=stride_list[i])
+                                )
+                            )
+                        )
+                        ch_hint = chan
+
+                    # 3. LSCTuner 路径：为每个 decoder 的 skip connection 建立适配器
+                    from .SCTuner import SCTuner
+                    self.lsc_tuner_blocks = nn.ModuleList()
+                    self.lsc_identity = nn.ModuleList()  # ✅ 添加 Identity 用于 residual 判定
+                    for skip_chan in decoder_chans:
+                        tuner_length = int(skip_chan * down_ratio)
+                        self.lsc_tuner_blocks.append(
+                            SCTuner(dim=skip_chan, tuner_length=tuner_length)
+                        )
+                        self.lsc_identity.append(nn.Identity())
+
+            # 创建 control_block 实例
+            self.control_block = _CSCControlBlock(
+                in_channels=in_channels,
+                encoder_chans=self._encoder_block_chans,  # ✅ 使用保存的 encoder 通道列表
+                decoder_chans=self._decoder_skip_chans,
+                channel_mult=channel_mult,
+                num_res_blocks=num_res_blocks,
+                dims=dims,
+                dense_hint_kernel=csc_dense_hint_kernel,
+                down_ratio=1.0
+            )
         else:
-            self.pre_hint_blocks = None
-            self.dense_hint_blocks = None
-            self.lsc_tuner_blocks = None
+            self.control_block = None
 
     def convert_to_fp32(self):
         """
@@ -2895,58 +2908,81 @@ class UNetModel_v1sc(nn.Module):
 
     def forward(self, x, timesteps, y=None, control_scale=1.0, tuner_scale=1.0):
         """
-        Apply the model to an input batch.
+        Apply the model to an input batch with Highway + CSCTuner.
 
         :param x: an [N x C x ...] Tensor of inputs.
         :param timesteps: a 1-D batch of timesteps.
         :param y: an [N] Tensor of labels, if class-conditional.
-        :return: an [N x C x ...] Tensor of outputs.
+        :param control_scale: CSCTuner 控制强度
+        :param tuner_scale: Tuner residual 强度
+        :return: (out, cal) tuple
         """
+        assert (y is not None) == (
+            self.num_classes is not None
+        ), "must specify y if and only if the model is class-conditional"
+
+        hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+
         if self.num_classes is not None:
+            assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
 
-        # ✅ 路由到控制路径
-        hint = x[:, :-1, ...]  # 排除最後一個通道作為 hint 輸入
-        c = x[:,:-1,...]
-        # ==================== Hints 生成 ====================
-        hint_h = self.control_block.pre_hint_blocks(hint)
-        hint_hs = []
-        for block in self.control_block.dense_hint_blocks:
-            hint_h = block(hint_h)
-            hint_hs.append(hint_h)
+        h = x.type(self.dtype)
+        c = h[:, :-1, ...]  # ✅ 控制输入（排除最后的噪声通道）
 
-        # ==================== UNet Encoder ====================
-        hs = []
-        h = x
-        for module in self.input_blocks:
+        # ==================== CSCTuner：生成 DenseHint（用于 Encoder）====================
+        dense_hints = []
+        if hasattr(self, 'control_block') and self.control_block is not None:
+            hint_h = self.control_block.pre_hint_blocks(c)
+            for block in self.control_block.dense_hint_blocks:
+                hint_h = block(hint_h)
+                dense_hints.append(hint_h)
+
+        # ==================== UNet Encoder（注入 DenseHint）====================
+        for ind, module in enumerate(self.input_blocks):
+            if len(emb.size()) > 2:
+                emb = emb.squeeze()
             h = module(h, emb)
+
+            # ✅ 在 encoder 阶段注入 dense hint
+            if dense_hints and ind < len(dense_hints):
+                h = h + dense_hints[ind]
+
             hs.append(h)
-        uemb, cal = self.highway_forward(c, [hs[3], hs[6], hs[9], hs[12]])
-        h = h + uemb
+
+        # ==================== Highway 机制 ====================
+        if hasattr(self, 'hwm') and self.hwm is not None:
+            uemb, cal = self.highway_forward(c, [hs[3], hs[6], hs[9], hs[12]])
+            h = h + uemb
+        else:
+            cal = None
+
+        # ==================== Middle Block ====================
         h = self.middle_block(h, emb)
 
-        # ==================== UNet Decoder ====================
+        # ==================== UNet Decoder（使用 LSCTuner）====================
         for m_id, module in enumerate(self.output_blocks):
             skip_h = hs.pop()
 
-            # LSCTuner 控制量
-            hint_h = hint_hs[::-1][m_id]  # ✅ 反序取对应阶段 hint
-            control_h = self.control_block.lsc_tuner_blocks[m_id](
-                skip_h + hint_h, x_shortcut=hint_h
-            )
-            multi_control_h = self.control_block.scale * control_h
+            # ✅ 使用 LSCTuner 调制 skip connection
+            if hasattr(self, 'control_block') and self.control_block is not None and m_id < len(self.control_block.lsc_tuner_blocks):
+                control_h = self.control_block.lsc_tuner_blocks[m_id](skip_h, x_shortcut=skip_h, use_shortcut=True)
 
-            # Tuner residual 判定（与参考代码逻辑一致）
-            tuner_h = self.control_block.lsc_identity[m_id](skip_h) - skip_h
-            if torch.all(torch.isclose(tuner_h, torch.zeros_like(tuner_h), atol=1e-6)):
-                skip_h_new = skip_h + control_scale * multi_control_h
+                # Tuner residual 判定
+                tuner_h = self.control_block.lsc_identity[m_id](skip_h) - skip_h
+                if torch.all(torch.isclose(tuner_h, torch.zeros_like(tuner_h), atol=1e-6)):
+                    skip_h_new = skip_h + control_scale * control_h
+                else:
+                    skip_h_new = skip_h + control_scale * control_h + tuner_scale * tuner_h
             else:
-                skip_h_new = skip_h + control_scale * multi_control_h + tuner_scale * tuner_h
+                skip_h_new = skip_h
 
             h = torch.cat([h, skip_h_new], dim=1)
             h = module(h, emb)
 
-        return self.out(h)
+        h = h.type(x.dtype)
+        out = self.out(h)
+        return out, cal  # ✅ 返回 (out, cal)
 
 
