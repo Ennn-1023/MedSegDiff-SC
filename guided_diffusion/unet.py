@@ -2737,11 +2737,8 @@ class UNetModel_v1sc(nn.Module):
         self._feature_size += ch
 
         self.output_blocks = nn.ModuleList([])
-        self._decoder_skip_chans = []  # record skip channels per decoder stage
-        ds = 1
-        ch = model_channels
-        input_block_chans = [model_channels]
-        # ...existing encoder construction already fills input_block_chans and ch, ds...
+        self._decoder_skip_chans = [] # record skip channels per decoder stage
+        # 使用 encoder 阶段的 input_block_chans, ch, ds（不要重新初始化）
         for level, mult in list(enumerate(channel_mult))[::-1]:
             for i in range(num_res_blocks + 1):
                 ich = input_block_chans.pop()
