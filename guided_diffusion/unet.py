@@ -2811,35 +2811,22 @@ class UNetModel_v1sc(nn.Module):
                     csc_pre_hint_out_channels = 256
                     pre_hint_dim_ratio = 1.0
 
-                    # 1. PreHint 路径：提取全局特征
+                    # 1. PreHint 路径：提取全局特征（不改变空间尺寸）
                     ch = csc_pre_hint_out_channels
                     self.pre_hint_blocks = nn.Sequential(
                         conv_nd(dims, pre_hint_in_channels, int(16 * pre_hint_dim_ratio), 3, padding=1),
                         nn.SiLU(),
-                        conv_nd(dims, int(16 * pre_hint_dim_ratio), int(16 * pre_hint_dim_ratio), 3, padding=1),
+                        conv_nd(dims, int(16 * pre_hint_dim_ratio), int(32 * pre_hint_dim_ratio), 3, padding=1),
                         nn.SiLU(),
-                        conv_nd(dims, int(16 * pre_hint_dim_ratio), int(32 * pre_hint_dim_ratio), 3, padding=1, stride=2),
+                        conv_nd(dims, int(32 * pre_hint_dim_ratio), int(64 * pre_hint_dim_ratio), 3, padding=1),
                         nn.SiLU(),
-                        conv_nd(dims, int(32 * pre_hint_dim_ratio), int(32 * pre_hint_dim_ratio), 3, padding=1),
-                        nn.SiLU(),
-                        conv_nd(dims, int(32 * pre_hint_dim_ratio), int(96 * pre_hint_dim_ratio), 3, padding=1, stride=2),
-                        nn.SiLU(),
-                        conv_nd(dims, int(96 * pre_hint_dim_ratio), int(96 * pre_hint_dim_ratio), 3, padding=1),
-                        nn.SiLU(),
-                        conv_nd(dims, int(96 * pre_hint_dim_ratio), ch, 3, padding=1, stride=2),
+                        conv_nd(dims, int(64 * pre_hint_dim_ratio), ch, 3, padding=1),
                     )
 
-                    # 2. DenseHint 路径：为每个 encoder 阶段建立空间卷积
+                    # 2. DenseHint 路径：为每个 encoder 阶段建立空间卷积（保持空间尺寸）
                     self.dense_hint_blocks = nn.ModuleList()
-                    # 构建 stride 列表（根据是否 downsample）
-                    stride_list = [1]  # ✅ 初始 conv block 的 stride
-                    for level, mult in enumerate(channel_mult):
-                        for _ in range(num_res_blocks):
-                            stride_list.append(1)
-                        if level != len(channel_mult) - 1:
-                            stride_list.append(2)
 
-                    # 为每个 input_block 建立对应的 dense hint
+                    # 为每个 input_block 建立对应的 dense hint（不改变空间尺寸）
                     ch_hint = csc_pre_hint_out_channels
                     for i, chan in enumerate(encoder_chans):
                         padding = 1 if dense_hint_kernel == 3 else 0
@@ -2848,7 +2835,7 @@ class UNetModel_v1sc(nn.Module):
                                 nn.SiLU(),
                                 zero_module(
                                     conv_nd(dims, ch_hint, chan, dense_hint_kernel,
-                                            padding=padding, stride=stride_list[i])
+                                            padding=padding, stride=1)  # ✅ 始终 stride=1
                                 )
                             )
                         )
@@ -2945,9 +2932,13 @@ class UNetModel_v1sc(nn.Module):
                 emb = emb.squeeze()
             h = module(h, emb)
 
-            # ✅ 在 encoder 阶段注入 dense hint
+            # ✅ 在 encoder 阶段注入 dense hint（使用插值匹配空间尺寸）
             if dense_hints and ind < len(dense_hints):
-                h = h + dense_hints[ind]
+                hint_feat = dense_hints[ind]
+                # 如果空间尺寸不匹配，使用插值调整
+                if hint_feat.shape[-2:] != h.shape[-2:]:
+                    hint_feat = F.interpolate(hint_feat, size=h.shape[-2:], mode='bilinear', align_corners=False)
+                h = h + hint_feat
 
             hs.append(h)
 
