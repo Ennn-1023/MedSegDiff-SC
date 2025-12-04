@@ -75,7 +75,7 @@ def main():
         model.to(dist_util.dev())
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion,  maxt=args.diffusion_steps)
 
-
+    freeze = True if args.version == 'sc' else False
     logger.log("training...")
     TrainLoop(
         model=model,
@@ -95,6 +95,7 @@ def main():
         schedule_sampler=schedule_sampler,
         weight_decay=args.weight_decay,
         lr_anneal_steps=args.lr_anneal_steps,
+        freeze=freeze,
     ).run_loop()
 
 

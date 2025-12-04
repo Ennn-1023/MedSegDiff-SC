@@ -52,6 +52,7 @@ class TrainLoop:
         schedule_sampler=None,
         weight_decay=0.0,
         lr_anneal_steps=0,
+        freeze=False,
     ):
         self.model = model
         self.dataloader=dataloader
@@ -74,6 +75,7 @@ class TrainLoop:
         self.schedule_sampler = schedule_sampler or UniformSampler(diffusion)
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
+        self.freeze = freeze
 
         self.step = 0
         self.resume_step = resume_step
@@ -142,27 +144,29 @@ class TrainLoop:
                         resume_checkpoint, map_location=dist_util.dev()
                     )
                 )
-        # 凍結除 control_block 之外的所有參數
-        print("Freezing model parameters except control_block")
-        trainable_count = 0
-        frozen_count = 0
-        for name, param in self.model.named_parameters():
-            if 'control_block' in name:
-                param.requires_grad = True
-                trainable_count += 1
-                if dist.get_rank() == 0:
-                    logger.log(f"  Trainable: {name} ({param.numel():,} params)")
-            else:
-                param.requires_grad = False
-                frozen_count += 1
+        if self.freeze:
+            # 凍結除 control_block 之外的所有參數
+            print("Freezing model parameters except control_block")
+            trainable_count = 0
+            frozen_count = 0
+            for name, param in self.model.named_parameters():
+                if 'control_block' in name:
+                    param.requires_grad = True
+                    trainable_count += 1
+                    if dist.get_rank() == 0:
+                        logger.log(f"  Trainable: {name} ({param.numel():,} params)")
+                else:
+                    param.requires_grad = False
+                    frozen_count += 1
 
-        if dist.get_rank() == 0:
-            total_trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-            total_params = sum(p.numel() for p in self.model.parameters())
-            logger.log(f"Parameter summary:")
-            logger.log(f"  Trainable layers: {trainable_count}")
-            logger.log(f"  Frozen layers: {frozen_count}")
-            logger.log(f"  Trainable params: {total_trainable_params:,} / {total_params:,} ({100*total_trainable_params/total_params:.2f}%)")
+            if dist.get_rank() == 0:
+                total_trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+                total_params = sum(p.numel() for p in self.model.parameters())
+                logger.log(f"Parameter summary:")
+                logger.log(f"  Trainable layers: {trainable_count}")
+                logger.log(f"  Frozen layers: {frozen_count}")
+                logger.log(
+                    f"  Trainable params: {total_trainable_params:,} / {total_params:,} ({100 * total_trainable_params / total_params:.2f}%)")
 
         dist_util.sync_params(self.model.parameters())
 
