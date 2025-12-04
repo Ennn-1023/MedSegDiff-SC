@@ -122,6 +122,10 @@ class TrainLoop:
             self.use_ddp = False
             self.ddp_model = self.model
 
+        # test parameter
+        for name, param in self.model.named_parameters():
+                print(f"{name} requires_grad: {param.requires_grad}")
+
     def _load_and_sync_parameters(self):
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
 
