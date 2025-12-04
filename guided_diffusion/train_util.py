@@ -88,8 +88,14 @@ class TrainLoop:
             fp16_scale_growth=fp16_scale_growth,
         )
 
+        # ✅ Only optimize trainable parameters
+        # After freezing, master_params will have correct requires_grad status
+        trainable_params = [p for p in self.mp_trainer.master_params if p.requires_grad]
+        total_params = len(self.mp_trainer.master_params)
+        logger.log(f"Trainable master params: {len(trainable_params)} / {total_params}")
+
         self.opt = AdamW(
-            self.mp_trainer.master_params, lr=self.lr, weight_decay=self.weight_decay
+            trainable_params, lr=self.lr, weight_decay=self.weight_decay
         )
         if self.resume_step:
             self._load_optimizer_state()
@@ -123,10 +129,6 @@ class TrainLoop:
             self.use_ddp = False
             self.ddp_model = self.model
 
-        # test parameter
-        for name, param in self.model.named_parameters():
-                print(f"{name} requires_grad: {param.requires_grad}")
-
     def _load_and_sync_parameters(self):
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
 
@@ -141,10 +143,26 @@ class TrainLoop:
                     )
                 )
         # 凍結除 control_block 之外的所有參數
-        print("freeze model parameters except control_block")
+        print("Freezing model parameters except control_block")
+        trainable_count = 0
+        frozen_count = 0
         for name, param in self.model.named_parameters():
-            if 'control_block' not in name:
+            if 'control_block' in name:
+                param.requires_grad = True
+                trainable_count += 1
+                if dist.get_rank() == 0:
+                    logger.log(f"  Trainable: {name} ({param.numel():,} params)")
+            else:
                 param.requires_grad = False
+                frozen_count += 1
+
+        if dist.get_rank() == 0:
+            total_trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            total_params = sum(p.numel() for p in self.model.parameters())
+            logger.log(f"Parameter summary:")
+            logger.log(f"  Trainable layers: {trainable_count}")
+            logger.log(f"  Frozen layers: {frozen_count}")
+            logger.log(f"  Trainable params: {total_trainable_params:,} / {total_params:,} ({100*total_trainable_params/total_params:.2f}%)")
 
         dist_util.sync_params(self.model.parameters())
 

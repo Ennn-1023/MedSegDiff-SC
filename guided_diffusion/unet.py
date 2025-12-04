@@ -2921,9 +2921,12 @@ class UNetModel_v1sc(nn.Module):
         # ==================== CSCTuner：生成 DenseHint（用于 Encoder）====================
         dense_hints = []
         if hasattr(self, 'control_block') and self.control_block is not None:
-            hint_h = self.control_block.pre_hint_blocks(c)
-            for block in self.control_block.dense_hint_blocks:
-                hint_h = block(hint_h)
+            # ✅ 修改：為每個 encoder 階段獨立生成 hint，而不是串行累積
+            hint_base = self.control_block.pre_hint_blocks(c)  # 基礎特徵 [B, 256, H, W]
+
+            for i, block in enumerate(self.control_block.dense_hint_blocks):
+                # 為每個階段獨立處理，從 hint_base 開始
+                hint_h = block(hint_base)
                 dense_hints.append(hint_h)
 
         # ==================== UNet Encoder（注入 DenseHint）====================
