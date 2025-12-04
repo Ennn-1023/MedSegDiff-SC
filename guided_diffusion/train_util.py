@@ -46,6 +46,7 @@ class TrainLoop:
         log_interval,
         save_interval,
         resume_checkpoint,
+        resume_step=0,
         use_fp16=False,
         fp16_scale_growth=1e-3,
         schedule_sampler=None,
@@ -75,7 +76,7 @@ class TrainLoop:
         self.lr_anneal_steps = lr_anneal_steps
 
         self.step = 0
-        self.resume_step = 0
+        self.resume_step = resume_step
         self.global_batch = self.batch_size * dist.get_world_size()
 
         self.sync_cuda = th.cuda.is_available()
@@ -131,7 +132,7 @@ class TrainLoop:
 
         if resume_checkpoint:
             print('resume model')
-            self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
+            # self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
             if dist.get_rank() == 0:
                 logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
                 self.model.load_part_state_dict(
@@ -139,6 +140,11 @@ class TrainLoop:
                         resume_checkpoint, map_location=dist_util.dev()
                     )
                 )
+        # 凍結除 control_block 之外的所有參數
+        print("freeze model parameters except control_block")
+        for name, param in self.model.named_parameters():
+            if 'control_block' not in name:
+                param.requires_grad = False
 
         dist_util.sync_params(self.model.parameters())
 
