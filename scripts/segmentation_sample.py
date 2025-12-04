@@ -106,6 +106,9 @@ def main():
         elif args.data_name == 'BRATS':
             # slice_ID=path[0].split("_")[2] + "_" + path[0].split("_")[4]
             slice_ID=path[0].split("_")[-3] + "_" + path[0].split("slice")[-1].split('.nii')[0]
+        else:
+            # For other datasets (e.g., PH2, custom datasets)
+            slice_ID = os.path.splitext(os.path.basename(path[0]))[0]
 
         logger.log("sampling...")
 
