@@ -112,6 +112,9 @@ def main():
 
         logger.log("sampling...")
 
+        # ✅ Save ground truth mask for comparison
+        vutils.save_image(m, fp=os.path.join(args.out_dir, str(slice_ID)+'_gt.jpg'), nrow=1, padding=0)
+
         start = th.cuda.Event(enable_timing=True)
         end = th.cuda.Event(enable_timing=True)
         enslist = []
@@ -137,8 +140,13 @@ def main():
             co = th.tensor(cal_out)
             if args.version == 'new':
                 enslist.append(sample[:,-1,:,:])
+                current_mask = sample[:,-1,:,:]  # Extract mask for individual saving
             else:
                 enslist.append(co)
+                current_mask = co
+
+            # ✅ Always save individual masks for evaluation
+            vutils.save_image(current_mask, fp=os.path.join(args.out_dir, str(slice_ID)+f'_mask{i}.jpg'), nrow=1, padding=0)
 
             if args.debug:
                 # print('sample size is',sample.size())
