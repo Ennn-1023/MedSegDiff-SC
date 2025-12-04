@@ -22,8 +22,8 @@ class CustomDataset(Dataset):
 
         print("loading data from the directory :", data_path)
         path = data_path
-        images = sorted(glob(os.path.join(path, "images/*.png")))
-        masks = sorted(glob(os.path.join(path, "masks/*.png")))
+        images = sorted(glob(os.path.join(path, "Image/*.png")))
+        masks = sorted(glob(os.path.join(path, "Mask/*.png")))
 
         self.name_list = images
         self.label_list = masks
