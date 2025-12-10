@@ -28,7 +28,7 @@ from guided_diffusion.script_util import (
 )
 import torchvision.transforms as transforms
 from torchsummary import summary
-see d =10
+seed =10
 th.manual_seed(seed)
 th.cuda.manual_seed_all(seed)
 np.random.seed(seed)
