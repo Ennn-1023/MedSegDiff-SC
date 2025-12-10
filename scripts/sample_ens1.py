@@ -1,4 +1,5 @@
 
+
 import argparse
 import os
 from ssl import OP_NO_TLSv1
@@ -28,7 +29,7 @@ from guided_diffusion.script_util import (
 )
 import torchvision.transforms as transforms
 from torchsummary import summary
-seed =10
+seed=10
 th.manual_seed(seed)
 th.cuda.manual_seed_all(seed)
 np.random.seed(seed)
@@ -37,7 +38,7 @@ random.seed(seed)
 def visualize(img):
     _min = img.min()
     _max = img.max()
-    normalized_img = (img - _min )/ (_max - _min)
+    normalized_img = (img - _min)/ (_max - _min)
     return normalized_img
 
 
@@ -47,19 +48,19 @@ def main():
     logger.configure(dir = args.out_dir)
 
     if args.data_name == 'ISIC':
-        tran_list = [transforms.Resize((args.image_size ,args.image_size)), transforms.ToTensor() ,]
+        tran_list = [transforms.Resize((args.image_size,args.image_size)), transforms.ToTensor(),]
         transform_test = transforms.Compose(tran_list)
 
         ds = ISICDataset(args, args.data_dir, transform_test, mode = 'Test')
         args.in_ch = 4
     elif args.data_name == 'BRATS':
-        tran_list = [transforms.Resize((args.image_size ,args.image_size)) ,]
+        tran_list = [transforms.Resize((args.image_size,args.image_size)),]
         transform_test = transforms.Compose(tran_list)
 
-        ds = BRATSDataset3D(args.data_dir ,transform_test)
+        ds = BRATSDataset3D(args.data_dir,transform_test)
         args.in_ch = 5
     else:
-        tran_list = [transforms.Resize((args.image_size ,args.image_size)), transforms.ToTensor()]
+        tran_list = [transforms.Resize((args.image_size,args.image_size)), transforms.ToTensor()]
         transform_test = transforms.Compose(tran_list)
 
         ds = CustomDataset(args, args.data_dir, transform_test, mode = 'Test')
@@ -97,14 +98,14 @@ def main():
         model.convert_to_fp16()
     model.eval()
     for _ in range(len(data)):
-        b, m, path = next(data)  # should return an image from the dataloader "data"
+        b, m, path = next(data)  #should return an image from the dataloader "data"
         c = th.randn_like(b[:, :1, ...])
-        img = th.cat((b, c), dim=1)     # add a noise channel$
+        img = th.cat((b, c), dim=1)     #add a noise channel$
         if args.data_name == 'ISIC':
-            slice_I D =path[0].split("_")[-1].split('.')[0]
+            slice_ID=path[0].split("_")[-1].split('.')[0]
         elif args.data_name == 'BRATS':
             # slice_ID=path[0].split("_")[2] + "_" + path[0].split("_")[4]
-            slice_I D =path[0].split("_")[-3] + "_" + path[0].split("slice")[-1].split('.nii')[0]
+            slice_ID=path[0].split("_")[-3] + "_" + path[0].split("slice")[-1].split('.nii')[0]
         else:
             # For other datasets (e.g., PH2, custom datasets)
             slice_ID = os.path.splitext(os.path.basename(path[0]))[0]
@@ -112,13 +113,13 @@ def main():
         logger.log("sampling...")
 
         # ✅ Save ground truth mask for comparison
-        vutils.save_image(m, fp=os.path.join(args.out_dir, str(slice_ID ) +'_gt.jpg'), nrow=1, padding=0)
+        vutils.save_image(m, fp=os.path.join(args.out_dir, str(slice_ID)+'_gt.jpg'), nrow=1, padding=0)
 
         start = th.cuda.Event(enable_timing=True)
         end = th.cuda.Event(enable_timing=True)
         enslist = []
 
-        for i in range(args.num_ensemble):  # this is for the generation of an ensemble of 5 masks.
+        for i in range(args.num_ensemble):  #this is for the generation of an ensemble of 5 masks.
             model_kwargs = {}
             start.record()
             sample_fn = (
@@ -134,31 +135,30 @@ def main():
 
             end.record()
             th.cuda.synchronize()
-            print('time for 1 sample', start.elapsed_time(end))  # time measurement for the generation of 1 sample
+            print('time for 1 sample', start.elapsed_time(end))  #time measurement for the generation of 1 sample
 
             co = cal_out.detach().clone() if isinstance(cal_out, th.Tensor) else th.tensor(cal_out)
             if args.version == 'new':
-                enslist.append(sample[: ,-1 ,: ,:])
-                current_mask = sample[: ,-1 ,: ,:]  # Extract mask for individual saving
+                enslist.append(sample[:,-1,:,:])
+                current_mask = sample[:,-1,:,:]  # Extract mask for individual saving
             else:
                 # #正規化讓多版本輸出變亮
                 # co_norm = (co - co.min()) / (co.max() - co.min() + 1e-8)
                 # enslist.append(co_norm)
                 # current_mask = co_norm
-                enslist.append(co)
+                enslist.append(co) 
                 current_mask = co
             # 直接儲存機率圖，不做 Min-Max 拉伸
             # 如果模型輸出全黑 (數值很小)，圖片就該是黑的
-            vutils.save_image(current_mask, fp=os.path.join(args.out_dir, str(slice_ID ) +f'_prob{i}.jpg'), nrow=1, padding=0, normalize=False)
+            vutils.save_image(current_mask, fp=os.path.join(args.out_dir, str(slice_ID)+f'_prob{i}.jpg'), nrow=1, padding=0, normalize=False)
 
             # 額外儲存二值化後的結果 (Mask)，閾值設為 0.5
             # 這張圖代表模型最終判定哪裡是腫瘤
             binary_mask = (current_mask > 0.3).float()
-            vutils.save_image(binary_mask, fp=os.path.join(args.out_dir, str(slice_ID ) +f'_mask{i}.jpg'), nrow=1, padding=0, normalize=False)
-
+            vutils.save_image(binary_mask, fp=os.path.join(args.out_dir, str(slice_ID)+f'_mask{i}.jpg'), nrow=1, padding=0, normalize=False)
+            
             if i < 3:
-                print \
-                    (f'  Mask {i} - Range: [{current_mask.min():.4f}, {current_mask.max():.4f}] (Should be approx 0 to 1)')
+                print(f'  Mask {i} - Range: [{current_mask.min():.4f}, {current_mask.max():.4f}] (Should be approx 0 to 1)')
             # --- 修正結束 ---
             # # ✅ 標準化 mask 到 [0, 1] 範圍，確保不是淡白色
             # # 方法: Min-Max 標準化
@@ -186,12 +186,12 @@ def main():
                 # print('cal size is',cal.size())
                 if args.data_name == 'ISIC':
                     # s = th.tensor(sample)[:,-1,:,:].unsqueeze(1).repeat(1, 3, 1, 1)
-                    o = th.tensor(org)[: ,:-1 ,: ,:]
+                    o = th.tensor(org)[:,:-1,:,:]
                     c = th.tensor(cal).repeat(1, 3, 1, 1)
                     # co = co.repeat(1, 3, 1, 1)
 
-                    s = sample[: ,-1 ,: ,:]
-                    b ,h ,w = s.size()
+                    s = sample[:,-1,:,:]
+                    b,h,w = s.size()
                     ss = s.clone()
                     ss = ss.view(s.size(0), -1)
                     ss -= ss.min(1, keepdim=True)[0]
@@ -199,29 +199,29 @@ def main():
                     ss = ss.view(b, h, w)
                     ss = ss.unsqueeze(1).repeat(1, 3, 1, 1)
 
-                    tup = (ss ,o ,c)
+                    tup = (ss,o,c)
                 elif args.data_name == 'BRATS':
-                    s = th.tensor(sample)[: ,-1 ,: ,:].unsqueeze(1)
-                    m = th.tensor(m.to(device = 'cuda:0'))[: ,0 ,: ,:].unsqueeze(1)
-                    o1 = th.tensor(org)[: ,0 ,: ,:].unsqueeze(1)
-                    o2 = th.tensor(org)[: ,1 ,: ,:].unsqueeze(1)
-                    o3 = th.tensor(org)[: ,2 ,: ,:].unsqueeze(1)
-                    o4 = th.tensor(org)[: ,3 ,: ,:].unsqueeze(1)
+                    s = th.tensor(sample)[:,-1,:,:].unsqueeze(1)
+                    m = th.tensor(m.to(device = 'cuda:0'))[:,0,:,:].unsqueeze(1)
+                    o1 = th.tensor(org)[:,0,:,:].unsqueeze(1)
+                    o2 = th.tensor(org)[:,1,:,:].unsqueeze(1)
+                    o3 = th.tensor(org)[:,2,:,:].unsqueeze(1)
+                    o4 = th.tensor(org)[:,3,:,:].unsqueeze(1)
                     c = th.tensor(cal)
 
-                    tup = (o 1 /o1.max() ,o 2 /o2.max() ,o 3 /o3.max() ,o 4 /o4.max() ,m ,s ,c ,co)
+                    tup = (o1/o1.max(),o2/o2.max(),o3/o3.max(),o4/o4.max(),m,s,c,co)
 
-                compose = th.cat(tup ,0)
-                vutils.save_image(compose, fp = os.path.join(args.out_dir, str(slice_ID ) +'_output ' +str(i ) +".jpg"), nrow = 1, padding = 10)
+                compose = th.cat(tup,0)
+                vutils.save_image(compose, fp = os.path.join(args.out_dir, str(slice_ID)+'_output'+str(i)+".jpg"), nrow = 1, padding = 10)
 
         # # Ensemble fusion
         # ensres = staple(th.stack(enslist,dim=0)).squeeze(0)
         # 1. 堆疊所有預測
-        stacked_preds = th.stack(enslist, dim=0)
+        stacked_preds = th.stack(enslist, dim=0) 
 
         # 2. (建議) 先轉成 0/1 Mask 再做 STAPLE，這樣最穩
         # 設定閾值，例如 0.5。如果模型普遍信心低，可暫時降到 0.3 測試
-        binary_preds = (stacked_preds > 0.3).float()
+        binary_preds = (stacked_preds > 0.3).float() 
 
         # 3. 進行集成
         ensres = staple(binary_preds).squeeze(0)
@@ -242,11 +242,11 @@ def main():
         # --- 修正開始 ---
         # STAPLE 輸出通常是機率或 0/1，不需要再做 Min-Max Normalization
         # 這樣才能保留 "全黑" 的預測結果
-
+        
         print(f'\nEnsemble result - Range: [{ensres.min():.4f}, {ensres.max():.4f}]')
-
+        
         # 直接存檔
-        vutils.save_image(ensres, fp = os.path.join(args.out_dir, str(slice_ID ) +'_output_ens ' +".jpg"), nrow = 1, padding = 10, normalize=False)
+        vutils.save_image(ensres, fp = os.path.join(args.out_dir, str(slice_ID)+'_output_ens'+".jpg"), nrow = 1, padding = 10, normalize=False)
         # --- 修正結束 ---
 
 def create_argparser():
@@ -257,11 +257,11 @@ def create_argparser():
         num_samples=1,
         batch_size=1,
         use_ddim=False,
-        model_path="",         # path to pretrain model
-        num_ensemble=5,      # number of samples in the ensemble
+        model_path="",         #path to pretrain model
+        num_ensemble=5,      #number of samples in the ensemble
         gpu_dev = "0",
         out_dir='./results/',
-        multi_gpu = None, # "0,1,2"
+        multi_gpu = None, #"0,1,2"
         debug = False
     )
     defaults.update(model_and_diffusion_defaults())
