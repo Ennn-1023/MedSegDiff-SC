@@ -137,7 +137,7 @@ def main():
             th.cuda.synchronize()
             print('time for 1 sample', start.elapsed_time(end))  #time measurement for the generation of 1 sample
 
-            co = cal_out.detach().clone() if isinstance(cal_out, th.Tensor) else th.tensor(cal_out)
+            co = th.tensor(cal_out)
             if args.version == 'new':
                 enslist.append(sample[:,-1,:,:])
                 current_mask = sample[:,-1,:,:]  # Extract mask for individual saving
@@ -145,25 +145,8 @@ def main():
                 enslist.append(co)
                 current_mask = co
 
-            # ✅ 標準化 mask 到 [0, 1] 範圍，確保不是淡白色
-            # 方法: Min-Max 標準化
-            mask_to_save = current_mask.clone()
-            mask_min = mask_to_save.min()
-            mask_max = mask_to_save.max()
-
-            if mask_max > mask_min:  # 避免除零
-                mask_to_save = (mask_to_save - mask_min) / (mask_max - mask_min)
-            else:
-                mask_to_save = mask_to_save * 0  # 全黑
-
-            # Debug: 打印前 3 個樣本的統計信息
-            if i < 3:
-                print(f'  Mask {i} - Original range: [{current_mask.min():.4f}, {current_mask.max():.4f}]')
-                print(f'  Mask {i} - Normalized range: [{mask_to_save.min():.4f}, {mask_to_save.max():.4f}]')
-                print(f'  Mask {i} - Mean: {mask_to_save.mean():.4f}')
-
-            # ✅ Always save individual masks for evaluation (normalized to [0,1])
-            vutils.save_image(mask_to_save, fp=os.path.join(args.out_dir, str(slice_ID)+f'_mask{i}.jpg'), nrow=1, padding=0, normalize=False)
+            # ✅ Always save individual masks for evaluation
+            vutils.save_image(current_mask, fp=os.path.join(args.out_dir, str(slice_ID)+f'_mask{i}.jpg'), nrow=1, padding=0)
 
             if args.debug:
                 # print('sample size is',sample.size())
@@ -198,23 +181,8 @@ def main():
 
                 compose = th.cat(tup,0)
                 vutils.save_image(compose, fp = os.path.join(args.out_dir, str(slice_ID)+'_output'+str(i)+".jpg"), nrow = 1, padding = 10)
-
-        # Ensemble fusion
         ensres = staple(th.stack(enslist,dim=0)).squeeze(0)
-
-        # ✅ 標準化 ensemble 結果
-        ensres_min = ensres.min()
-        ensres_max = ensres.max()
-        if ensres_max > ensres_min:
-            ensres_normalized = (ensres - ensres_min) / (ensres_max - ensres_min)
-        else:
-            ensres_normalized = ensres * 0
-
-        print(f'\nEnsemble result - Original range: [{ensres.min():.4f}, {ensres.max():.4f}]')
-        print(f'Ensemble result - Normalized range: [{ensres_normalized.min():.4f}, {ensres_normalized.max():.4f}]')
-        print(f'Ensemble result - Mean: {ensres_normalized.mean():.4f}')
-
-        vutils.save_image(ensres_normalized, fp = os.path.join(args.out_dir, str(slice_ID)+'_output_ens'+".jpg"), nrow = 1, padding = 10, normalize=False)
+        vutils.save_image(ensres, fp = os.path.join(args.out_dir, str(slice_ID)+'_output_ens'+".jpg"), nrow = 1, padding = 10)
 
 def create_argparser():
     defaults = dict(
