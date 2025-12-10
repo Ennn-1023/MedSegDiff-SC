@@ -52,14 +52,12 @@ def process_ph2():
     
     # 計算切分索引
     train_count = int(total_cases * RATIOS['Train'])
-    val_count = int(total_cases * RATIOS['Val'])
     # 剩下的全部給 Test (避免浮點數誤差導致少算)
     
     # 進行切片
     datasets = {
         'Train': cases[:train_count],
-        'Val':   cases[train_count : train_count + val_count],
-        'Test':  cases[train_count + val_count:]
+        'Test':  cases[train_count:],
     }
 
     # 4. 開始處理圖片
@@ -108,7 +106,6 @@ def process_ph2():
 
     print("\n✅ 資料預處理完成！")
     print(f"   Train: {len(datasets['Train'])} 筆")
-    print(f"   Val  : {len(datasets['Val'])} 筆")
     print(f"   Test : {len(datasets['Test'])} 筆")
 
 if __name__ == "__main__":
