@@ -149,7 +149,7 @@ def main():
                 num += 1
                 ind = name.split('_')[0]
                 pred = Image.open(os.path.join(root, name)).convert('L')
-                gt_name = f"{ind}_Segmentation.png" if args.name == 'ISIC' else f"{ind}.png"
+                gt_name = f"ISIC_{ind}_Segmentation.png" if args.name == 'ISIC' else f"{ind}.png"
                 gt = Image.open(os.path.join(gt_path, gt_name)).convert('L')
                 pred = torchvision.transforms.PILToTensor()(pred)
                 pred = torch.unsqueeze(pred,0).float() 
