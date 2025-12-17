@@ -1,10 +1,11 @@
+
 import sys
 import argparse
 sys.path.append("../")
 sys.path.append("./")
 from guided_diffusion import dist_util, logger
 from guided_diffusion.resample import create_named_schedule_sampler
-from guided_diffusion.bratsloader import BRATSDataset3D
+from guided_diffusion.bratsloader import BRATSDataset, BRATSDataset3D
 from guided_diffusion.isicloader import ISICDataset
 from guided_diffusion.custom_dataset_loader import CustomDataset,CustomDataset3D
 from guided_diffusion.script_util import (
@@ -16,21 +17,15 @@ from guided_diffusion.script_util import (
 import torch as th
 from pathlib import Path
 from guided_diffusion.train_util import TrainLoop
-# try:
-#     from visdom import Visdom
-#     viz = Visdom(port=8850)
-# except Exception:
-#     viz = None
+# from visdom import Visdom
+# viz = Visdom(port=8850)
 import torchvision.transforms as transforms
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
 def main():
     args = create_argparser().parse_args()
 
-    dist_util.setup_dist(args)
-    # Configure logger with stdout, log file, csv, and tensorboard
-    logger.configure(dir = args.out_dir, format_strs=["stdout","log","csv","tensorboard"])
+    #dist_util.setup_dist(args)
+    logger.configure(dir = args.out_dir)
 
     logger.log("creating data loader...")
 
@@ -46,11 +41,11 @@ def main():
 
         ds = BRATSDataset3D(args.data_dir, transform_train, test_flag=False)
         args.in_ch = 5
-    elif any(Path(args.data_dir).glob("*\\*.nii.gz")):
+    elif any(Path(args.data_dir).glob("*\*.nii.gz")):
         tran_list = [transforms.Resize((args.image_size,args.image_size)),]
         transform_train = transforms.Compose(tran_list)
         print("Your current directory : ",args.data_dir)
-        ds = CustomDataset3D(args.data_dir, transform_train)
+        ds = CustomDataset3D(args, args.data_dir, transform_train)
         args.in_ch = 4
     else:
         tran_list = [transforms.Resize((args.image_size,args.image_size)), transforms.ToTensor(),]
@@ -74,30 +69,7 @@ def main():
         model = th.nn.DataParallel(model,device_ids=[int(id) for id in args.multi_gpu.split(',')])
         model.to(device = th.device('cuda', int(args.gpu_dev)))
     else:
-        # Robust single-device selection with OOM fallback
-        if th.cuda.is_available() and str(args.gpu_dev) not in ("", "cpu"):
-            try:
-                dev_index = int(str(args.gpu_dev)) if str(args.gpu_dev).isdigit() else 0
-                device = th.device(f'cuda:{dev_index}')
-            except Exception:
-                device = th.device('cuda:0')
-        else:
-            device = th.device('cpu')
-        try:
-            model.to(device=device)
-        except RuntimeError as e:
-            if 'out of memory' in str(e).lower():
-                logger.warn("CUDA out of memory when moving model to GPU. Falling back to CPU. "
-                            "Consider reducing --num_channels, --image_size, enabling --use_checkpoint or --use_fp16, "
-                            "or using a smaller batch size.")
-                try:
-                    th.cuda.empty_cache()
-                except Exception:
-                    pass
-                device = th.device('cpu')
-                model.to(device=device)
-            else:
-                raise
+        model.to(dist_util.dev())
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion,  maxt=args.diffusion_steps)
 
 
@@ -136,6 +108,31 @@ def create_argparser():
         ema_rate="0.9999",  # comma-separated list of EMA values
         log_interval=100,
         save_interval=5000,
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
         resume_checkpoint=None, #"/results/pretrainedmodel.pt"
         use_fp16=False,
         fp16_scale_growth=1e-3,
