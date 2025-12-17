@@ -5,7 +5,7 @@ Helpers for distributed training.
 import io
 import os
 import socket
-
+import tempfile
 import blobfile as bf
 #from mpi4py import MPI
 import torch as th
@@ -19,31 +19,8 @@ SETUP_RETRY_COUNT = 3
 
 
 def setup_dist(args):
-    """
-    Setup a distributed process group.
-    """
-    if dist.is_initialized():
-        return
-    if not args.multi_gpu:
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_dev
-
-    backend = "gloo" if not th.cuda.is_available() else "nccl"
-
-    if backend == "gloo":
-        hostname = "localhost"
-    else:
-        hostname = socket.gethostbyname(socket.getfqdn())
-    os.environ["MASTER_ADDR"] = '127.0.1.1'#comm.bcast(hostname, root=0)
-    os.environ["RANK"] = '0'#str(comm.rank)
-    os.environ["WORLD_SIZE"] = '1'#str(comm.size)
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("", 0))
-    s.listen(1)
-    port = s.getsockname()[1]
-    s.close()
-    os.environ["MASTER_PORT"] = str(port)
-    dist.init_process_group(backend=backend, init_method="env://")
+    # 單機單卡：不用做任何事
+    return
 
 
 def dev():

@@ -26,7 +26,6 @@ from .nn import (
     timestep_embedding,
     layer_norm,
 )
-from .SCTuner import CSCTunerSimple
 
 
 class AttentionPool2d(nn.Module):
@@ -537,8 +536,6 @@ class UNetModel_v1preview(nn.Module):
         resblock_updown=False,
         use_new_attention_order=False,
         high_way = True,
-        use_sctuner: bool = False,
-        sctuner_embed_dim: int = 128,
     ):
         super().__init__()
 
@@ -560,7 +557,6 @@ class UNetModel_v1preview(nn.Module):
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
-        self.use_sctuner = use_sctuner
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -639,17 +635,6 @@ class UNetModel_v1preview(nn.Module):
                 input_block_chans.append(ch)
                 ds *= 2
                 self._feature_size += ch
-
-        # Optional SCTuner that modulates encoder features per-stage.
-        if self.use_sctuner:
-            self.sctuner = CSCTunerSimple(
-                input_block_channels=input_block_chans,
-                pre_hint_in_channels=self.in_channels - 1,
-                embed_channels=sctuner_embed_dim,
-                dims=dims,
-            )
-        else:
-            self.sctuner = None
 
         self.middle_block = TimestepEmbedSequential(
             ResBlock(
@@ -797,11 +782,7 @@ class UNetModel_v1preview(nn.Module):
             if len(emb.size()) > 2:
                 emb = emb.squeeze()
             h = module(h, emb)
-            # Apply highway anchor only available in v1preview after block
             hs.append(h)
-            # Optional tuner: modulate per-stage using context c
-            if self.use_sctuner and self.sctuner is not None:
-                h = self.sctuner(c, h, ind)
         uemb, cal = self.highway_forward(c, [hs[3],hs[6],hs[9],hs[12]])
         h = h + uemb
         h = self.middle_block(h, emb)
@@ -811,7 +792,6 @@ class UNetModel_v1preview(nn.Module):
         h = h.type(x.dtype)
         out = self.out(h)
         return out, cal
-
 
 class UNetModel_newpreview(nn.Module):
     """
@@ -865,8 +845,6 @@ class UNetModel_newpreview(nn.Module):
         resblock_updown=False,
         use_new_attention_order=False,
         high_way = True,
-        use_sctuner: bool = False,
-        sctuner_embed_dim: int = 128,
     ):
         super().__init__()
 
@@ -888,7 +866,6 @@ class UNetModel_newpreview(nn.Module):
         self.num_heads = num_heads
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
-        self.use_sctuner = use_sctuner
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -968,17 +945,6 @@ class UNetModel_newpreview(nn.Module):
                 ds *= 2
                 self._feature_size += ch
 
-        # Optional SCTuner
-        if use_sctuner:
-            self.sctuner = CSCTunerSimple(
-                input_block_channels=input_block_chans,
-                pre_hint_in_channels=self.in_channels - 1,
-                embed_channels=sctuner_embed_dim,
-                dims=dims,
-            )
-        else:
-            self.sctuner = None
-
         self.middle_block = TimestepEmbedSequential(
             ResBlock(
                 ch,
@@ -1094,336 +1060,8 @@ class UNetModel_newpreview(nn.Module):
         hu = layer_norm(h.size()[1:])(h)
         return cu * hu * h
     
-    def highway_forward(self,x, hs):
-        return self.hwm(x,hs)
-
-
-    def forward(self, x, timesteps, y=None):
-        """
-        Apply the model to an input batch.
-
-        :param x: an [N x C x ...] Tensor of inputs.
-        :param timesteps: a 1-D batch of timesteps.
-        :param y: an [N] Tensor of labels, if class-conditional.
-        :return: an [N x C x ...] Tensor of outputs.
-        """
-        assert (y is not None) == (
-            self.num_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
-
-        hs = []
-        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-
-        if self.num_classes is not None:
-            assert y.shape == (x.shape[0],)
-            emb = emb + self.label_emb(y)
-
-        h = x.type(self.dtype)
-        c = h[:,:-1,...]
-        hlist= []
-        for ind, module in enumerate(self.input_blocks):
-            if len(emb.size()) > 2:
-                emb = emb.squeeze()
-            h = module(h, emb)
-            # Apply highway anchor only available in v1preview after block
-            hs.append(h)
-            # Optional tuner: modulate per-stage using context c
-            if self.use_sctuner and self.sctuner is not None:
-                h = self.sctuner(c, h, ind)
-        uemb, cal = self.highway_forward(c, [hs[3],hs[6],hs[9],hs[12]])
-        h = h + uemb
-        h = self.middle_block(h, emb)
-        for module in self.output_blocks:
-            h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb)
-        h = h.type(x.dtype)
-        out = self.out(h)
-        return out, cal
-
-
-class UNetModel_newpreview(nn.Module):
-    """
-    The full UNet model with attention and timestep embedding.
-    :param in_channels: channels in the input Tensor.
-    :param model_channels: base channel count for the model.
-    :param out_channels: channels in the output Tensor.
-    :param num_res_blocks: number of residual blocks per downsample.
-    :param attention_resolutions: a collection of downsample rates at which
-        attention will take place. May be a set, list, or tuple.
-        For example, if this contains 4, then at 4x downsampling, attention
-        will be used.
-    :param dropout: the dropout probability.
-    :param channel_mult: channel multiplier for each level of the UNet.
-    :param conv_resample: if True, use learned convolutions for upsampling and
-        downsampling.
-    :param dims: determines if the signal is 1D, 2D, or 3D.
-    :param num_classes: if specified (as an int), then this model will be
-        class-conditional with `num_classes` classes.
-    :param use_checkpoint: use gradient checkpointing to reduce memory usage.
-    :param num_heads: the number of attention heads in each attention layer.
-    :param num_heads_channels: if specified, ignore num_heads and instead use
-                               a fixed channel width per attention head.
-    :param num_heads_upsample: works with num_heads to set a different number
-                               of heads for upsampling. Deprecated.
-    :param use_scale_shift_norm: use a FiLM-like conditioning mechanism.
-    :param resblock_updown: use residual blocks for up/downsampling.
-    :param use_new_attention_order: use a different attention pattern for potentially
-                                    increased efficiency.
-    """
-
-    def __init__(
-        self,
-        image_size,
-        in_channels,
-        model_channels,
-        out_channels,
-        num_res_blocks,
-        attention_resolutions,
-        dropout=0,
-        channel_mult=(1, 2, 4, 8),
-        conv_resample=True,
-        dims=2,
-        num_classes=None,
-        use_checkpoint=False,
-        use_fp16=False,
-        num_heads=1,
-        num_head_channels=-1,
-        num_heads_upsample=-1,
-        use_scale_shift_norm=False,
-        resblock_updown=False,
-        use_new_attention_order=False,
-        high_way = True,
-        use_sctuner: bool = False,
-        sctuner_embed_dim: int = 128,
-    ):
-        super().__init__()
-
-        if num_heads_upsample == -1:
-            num_heads_upsample = num_heads
-
-        self.image_size = image_size
-        self.in_channels = in_channels
-        self.model_channels = model_channels
-        self.out_channels = out_channels
-        self.num_res_blocks = num_res_blocks
-        self.attention_resolutions = attention_resolutions
-        self.dropout = dropout
-        self.channel_mult = channel_mult
-        self.conv_resample = conv_resample
-        self.num_classes = num_classes
-        self.use_checkpoint = use_checkpoint
-        self.dtype = th.float16 if use_fp16 else th.float32
-        self.num_heads = num_heads
-        self.num_head_channels = num_head_channels
-        self.num_heads_upsample = num_heads_upsample
-        self.use_sctuner = use_sctuner
-
-        time_embed_dim = model_channels * 4
-        self.time_embed = nn.Sequential(
-            linear(model_channels, time_embed_dim),
-            nn.SiLU(),
-            linear(time_embed_dim, time_embed_dim),
-        )
-
-        if self.num_classes is not None:
-            self.label_emb = nn.Embedding(num_classes, time_embed_dim)
-
-        self.input_blocks = nn.ModuleList(
-            [
-                TimestepEmbedSequential(
-                    conv_nd(dims, in_channels, model_channels, 3, padding=1)
-                )
-            ]
-        )
-
-        self._feature_size = model_channels
-        input_block_chans = [model_channels]
-        ch = model_channels
-        ds = 1
-        for level, mult in enumerate(channel_mult):
-
-            for _ in range(num_res_blocks):
-                layers = [
-                    ResBlock(
-                        ch,
-                        time_embed_dim,
-                        dropout,
-                        out_channels=mult * model_channels,
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                    )
-                ]
-                ch = mult * model_channels
-                if ds in attention_resolutions:
-                    layers.append(
-                        AttentionBlock(
-                            ch,
-                            use_checkpoint=use_checkpoint,
-                            num_heads=num_heads,
-                            num_head_channels=num_head_channels,
-                            use_new_attention_order=use_new_attention_order,
-                        )
-                    )
-                self.input_blocks.append(TimestepEmbedSequential(*layers))
-                self._feature_size += ch
-                input_block_chans.append(ch)
-
-
-            if level != len(channel_mult) - 1:
-                out_ch = ch
-                self.input_blocks.append(
-                    TimestepEmbedSequential(
-                        ResBlock(
-                            ch,
-                            time_embed_dim,
-                            dropout,
-                            out_channels=out_ch,
-                            dims=dims,
-                            use_checkpoint=use_checkpoint,
-                            use_scale_shift_norm=use_scale_shift_norm,
-                            down=True,
-                        )
-                        if resblock_updown
-                        else Downsample(
-                            ch, conv_resample, dims=dims, out_channels=out_ch
-                        )
-                    )
-                )
-
-                ch = out_ch
-                input_block_chans.append(ch)
-                ds *= 2
-                self._feature_size += ch
-
-        # Optional SCTuner
-        if use_sctuner:
-            self.sctuner = CSCTunerSimple(
-                input_block_channels=input_block_chans,
-                pre_hint_in_channels=self.in_channels - 1,
-                embed_channels=sctuner_embed_dim,
-                dims=dims,
-            )
-        else:
-            self.sctuner = None
-
-        self.middle_block = TimestepEmbedSequential(
-            ResBlock(
-                ch,
-                time_embed_dim,
-                dropout,
-                dims=dims,
-                use_checkpoint=use_checkpoint,
-                use_scale_shift_norm=use_scale_shift_norm,
-            ),
-            AttentionBlock(
-                ch,
-                use_checkpoint=use_checkpoint,
-                num_heads=num_heads,
-                num_head_channels=num_head_channels,
-                use_new_attention_order=use_new_attention_order,
-            ),
-            ResBlock(
-                ch,
-                time_embed_dim,
-                dropout,
-                dims=dims,
-                use_checkpoint=use_checkpoint,
-                use_scale_shift_norm=use_scale_shift_norm,
-            ),
-        )
-        self._feature_size += ch
-
-        self.output_blocks = nn.ModuleList([])
-        for level, mult in list(enumerate(channel_mult))[::-1]:
-            for i in range(num_res_blocks + 1):
-                ich = input_block_chans.pop()
-                layers = [
-                    ResBlock(
-                        ch + ich,
-                        time_embed_dim,
-                        dropout,
-                        out_channels=model_channels * mult,
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                    )
-                ]
-                ch = model_channels * mult
-                if ds in attention_resolutions:
-                    layers.append(
-                        AttentionBlock(
-                            ch,
-                            use_checkpoint=use_checkpoint,
-                            num_heads=num_heads_upsample,
-                            num_head_channels=num_head_channels,
-                            use_new_attention_order=use_new_attention_order,
-                        )
-                    )
-                if level and i == num_res_blocks:
-                    out_ch = ch
-                    layers.append(
-                        ResBlock(
-                            ch,
-                            time_embed_dim,
-                            dropout,
-                            out_channels=out_ch,
-                            dims=dims,
-                            use_checkpoint=use_checkpoint,
-                            use_scale_shift_norm=use_scale_shift_norm,
-                            up=True,
-                        )
-                        if resblock_updown
-                        else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)
-                    )
-                    ds //= 2
-                self.output_blocks.append(TimestepEmbedSequential(*layers))
-                self._feature_size += ch
-
-        self.out = nn.Sequential(
-            normalization(ch),
-            nn.SiLU(),
-            zero_module(conv_nd(dims, model_channels , out_channels, 3, padding=1)),
-        )
-
-        if high_way:
-            features = 32
-            self.hwm = Generic_UNet(self.in_channels - 1, features, 1, 5, anchor_out=True, upscale_logits=True)
-
-    def convert_to_fp16(self):
-        """
-        Convert the torso of the model to float16.
-        """
-        self.input_blocks.apply(convert_module_to_f16)
-        self.middle_block.apply(convert_module_to_f16)
-        self.output_blocks.apply(convert_module_to_f16)
-
-    def convert_to_fp32(self):
-        """
-        Convert the torso of the model to float32.
-        """
-        self.input_blocks.apply(convert_module_to_f32)
-        self.middle_block.apply(convert_module_to_f32)
-        self.output_blocks.apply(convert_module_to_f32)
-
-    def load_part_state_dict(self, state_dict):
-
-        own_state = self.state_dict()
-        for name, param in state_dict.items():
-            if name not in own_state:
-                    continue
-            if isinstance(param, th.nn.Parameter):
-                # backwards compatibility for serialized parameters
-                param = param.data
-            own_state[name].copy_(param)
-
-    def enhance(self, c, h):
-        cu = layer_norm(c.size()[1:])(c)
-        hu = layer_norm(h.size()[1:])(h)
-        return cu * hu * h
-
-    def highway_forward(self,x, hs):
-        return self.hwm(x,hs)
+    def highway_forward(self,x, hs = None):
+        return self.hwm(x,hs = None)
 
 
     def forward(self, x, timesteps, y=None):
@@ -1454,12 +1092,9 @@ class UNetModel_newpreview(nn.Module):
                 emb = emb.squeeze()
             if ind == 0:
                 h = module(h, emb)
-                h = h + th.cat((anch[0], anch[0], anch[1]),1).detach()
+                h = h + th.cat((anch[0], anch[0], anch[1]),1).detach() # 32 + 32 + 64 in 256 res
             else:
                 h = module(h, emb)
-            # Optional tuner modulation
-            if self.sctuner is not None:
-                h = self.sctuner(c, h, ind)
             hs.append(h)
         h = self.middle_block(h, emb)
         for module in self.output_blocks:
@@ -1817,240 +1452,6 @@ class SegmentationNetwork(NeuralNetwork):
                     raise RuntimeError("Invalid conv op, cannot determine what dimensionality (2d/3d) the network is")
 
         return res
-
-    def predict_2D(self, x, do_mirroring: bool, mirror_axes: tuple = (0, 1, 2), use_sliding_window: bool = False,
-                   step_size: float = 0.5, patch_size: tuple = None, regions_class_order: tuple = None,
-                   use_gaussian: bool = False, pad_border_mode: str = "constant",
-                   pad_kwargs: dict = None, all_in_gpu: bool = False,
-                   verbose: bool = True, mixed_precision: bool = True) -> Tuple[np.ndarray, np.ndarray]:
-
-        torch.cuda.empty_cache()
-
-        assert step_size <= 1, 'step_size must be smaler than 1. Otherwise there will be a gap between consecutive ' \
-                               'predictions'
-
-        if self.conv_op == nn.Conv3d:
-            raise RuntimeError("Cannot predict 2d if the network is 3d. Dummy.")
-
-        if verbose: print("debug: mirroring", do_mirroring, "mirror_axes", mirror_axes)
-
-        if pad_kwargs is None:
-            pad_kwargs = {'constant_values': 0}
-
-        # A very long time ago the mirror axes were (2, 3) for a 2d network. This is just to intercept any old
-        # code that uses this convention
-        if len(mirror_axes):
-            if max(mirror_axes) > 1:
-                raise ValueError("mirror axes. duh")
-
-        if self.training:
-            print('WARNING! Network is in train mode during inference. This may be intended, or not...')
-
-        assert len(x.shape) == 3, "data must have shape (c,x,y)"
-
-        if mixed_precision:
-            context = autocast
-        else:
-            context = no_op
-
-        with context():
-            with torch.no_grad():
-                if self.conv_op == nn.Conv2d:
-                    if use_sliding_window:
-                        res = self._internal_predict_2D_2Dconv_tiled(x, step_size, do_mirroring, mirror_axes, patch_size,
-                                                                     regions_class_order, use_gaussian, pad_border_mode,
-                                                                     pad_kwargs, all_in_gpu, verbose)
-                    else:
-                        res = self._internal_predict_2D_2Dconv(x, patch_size, do_mirroring, mirror_axes, regions_class_order,
-                                                               pad_border_mode, pad_kwargs, verbose)
-                else:
-                    raise RuntimeError("Invalid conv op, cannot determine what dimensionality (2d/3d) the network is")
-
-        return res
-
-    @staticmethod
-    def _get_gaussian(patch_size, sigma_scale=1. / 8) -> np.ndarray:
-        tmp = np.zeros(patch_size)
-        center_coords = [i // 2 for i in patch_size]
-        sigmas = [i * sigma_scale for i in patch_size]
-        tmp[tuple(center_coords)] = 1
-        gaussian_importance_map = gaussian_filter(tmp, sigmas, 0, mode='constant', cval=0)
-        gaussian_importance_map = gaussian_importance_map / np.max(gaussian_importance_map) * 1
-        gaussian_importance_map = gaussian_importance_map.astype(np.float32)
-
-        # gaussian_importance_map cannot be 0, otherwise we may end up with nans!
-        gaussian_importance_map[gaussian_importance_map == 0] = np.min(
-            gaussian_importance_map[gaussian_importance_map != 0])
-
-        return gaussian_importance_map
-
-    @staticmethod
-    def _compute_steps_for_sliding_window(patch_size: Tuple[int, ...], image_size: Tuple[int, ...], step_size: float) -> List[List[int]]:
-        assert [i >= j for i, j in zip(image_size, patch_size)], "image size must be as large or larger than patch_size"
-        assert 0 < step_size <= 1, 'step_size must be larger than 0 and smaller or equal to 1'
-
-        # our step width is patch_size*step_size at most, but can be narrower. For example if we have image size of
-        # 110, patch size of 64 and step_size of 0.5, then we want to make 3 steps starting at coordinate 0, 23, 46
-        target_step_sizes_in_voxels = [i * step_size for i in patch_size]
-
-        num_steps = [int(np.ceil((i - k) / j)) + 1 for i, j, k in zip(image_size, target_step_sizes_in_voxels, patch_size)]
-
-        steps = []
-        for dim in range(len(patch_size)):
-            # the highest step value for this dimension is
-            max_step_value = image_size[dim] - patch_size[dim]
-            if num_steps[dim] > 1:
-                actual_step_size = max_step_value / (num_steps[dim] - 1)
-            else:
-                actual_step_size = 99999999999  # does not matter because there is only one step at 0
-
-            steps_here = [int(np.round(actual_step_size * i)) for i in range(num_steps[dim])]
-
-            steps.append(steps_here)
-
-        return steps
-
-    def _internal_predict_3D_3Dconv_tiled(self, x: np.ndarray, step_size: float, do_mirroring: bool, mirror_axes: tuple,
-                                          patch_size: tuple, regions_class_order: tuple, use_gaussian: bool,
-                                          pad_border_mode: str, pad_kwargs: dict, all_in_gpu: bool,
-                                          verbose: bool) -> Tuple[np.ndarray, np.ndarray]:
-        # better safe than sorry
-        assert len(x.shape) == 4, "x must be (c, x, y, z)"
-
-        if verbose: print("step_size:", step_size)
-        if verbose: print("do mirror:", do_mirroring)
-
-        assert patch_size is not None, "patch_size cannot be None for tiled prediction"
-
-        # for sliding window inference the image must at least be as large as the patch size. It does not matter
-        # whether the shape is divisible by 2**num_pool as long as the patch size is
-        data, slicer = pad_nd_image(x, patch_size, pad_border_mode, pad_kwargs, True, None)
-        data_shape = data.shape  # still c, x, y, z
-
-        # compute the steps for sliding window
-        steps = self._compute_steps_for_sliding_window(patch_size, data_shape[1:], step_size)
-        num_tiles = len(steps[0]) * len(steps[1]) * len(steps[2])
-
-        if verbose:
-            print("data shape:", data_shape)
-            print("patch size:", patch_size)
-            print("steps (x, y, and z):", steps)
-            print("number of tiles:", num_tiles)
-
-        # we only need to compute that once. It can take a while to compute this due to the large sigma in
-        # gaussian_filter
-        if use_gaussian and num_tiles > 1:
-            if self._gaussian_3d is None or not all(
-                    [i == j for i, j in zip(patch_size, self._patch_size_for_gaussian_3d)]):
-                if verbose: print('computing Gaussian')
-                gaussian_importance_map = self._get_gaussian(patch_size, sigma_scale=1. / 8)
-
-                self._gaussian_3d = gaussian_importance_map
-                self._patch_size_for_gaussian_3d = patch_size
-                if verbose: print("done")
-            else:
-                if verbose: print("using precomputed Gaussian")
-                gaussian_importance_map = self._gaussian_3d
-
-            gaussian_importance_map = torch.from_numpy(gaussian_importance_map)
-
-            #predict on cpu if cuda not available
-            if torch.cuda.is_available():
-                gaussian_importance_map = gaussian_importance_map.cuda(self.get_device(), non_blocking=True)
-
-        else:
-            gaussian_importance_map = None
-
-        if all_in_gpu:
-            # If we run the inference in GPU only (meaning all tensors are allocated on the GPU, this reduces
-            # CPU-GPU communication but required more GPU memory) we need to preallocate a few things on GPU
-
-            if use_gaussian and num_tiles > 1:
-                # half precision for the outputs should be good enough. If the outputs here are half, the
-                # gaussian_importance_map should be as well
-                gaussian_importance_map = gaussian_importance_map.half()
-
-                # make sure we did not round anything to 0
-                gaussian_importance_map[gaussian_importance_map == 0] = gaussian_importance_map[
-                    gaussian_importance_map != 0].min()
-
-                add_for_nb_of_preds = gaussian_importance_map
-            else:
-                add_for_nb_of_preds = torch.ones(patch_size, device=self.get_device())
-
-            if verbose: print("initializing result array (on GPU)")
-            aggregated_results = torch.zeros([self.num_classes] + list(data.shape[1:]), dtype=torch.half,
-                                             device=self.get_device())
-
-            if verbose: print("moving data to GPU")
-            data = torch.from_numpy(data).cuda(self.get_device(), non_blocking=True)
-
-            if verbose: print("initializing result_numsamples (on GPU)")
-            aggregated_nb_of_predictions = torch.zeros([self.num_classes] + list(data.shape[1:]), dtype=torch.half,
-                                                       device=self.get_device())
-
-        else:
-            if use_gaussian and num_tiles > 1:
-                add_for_nb_of_preds = self._gaussian_3d
-            else:
-                add_for_nb_of_preds = np.ones(patch_size, dtype=np.float32)
-            aggregated_results = np.zeros([self.num_classes] + list(data.shape[1:]), dtype=np.float32)
-            aggregated_nb_of_predictions = np.zeros([self.num_classes] + list(data.shape[1:]), dtype=np.float32)
-
-        for x in steps[0]:
-            lb_x = x
-            ub_x = x + patch_size[0]
-            for y in steps[1]:
-                lb_y = y
-                ub_y = y + patch_size[1]
-                for z in steps[2]:
-                    lb_z = z
-                    ub_z = z + patch_size[2]
-
-                    predicted_patch = self._internal_maybe_mirror_and_pred_3D(
-                        data[None, :, lb_x:ub_x, lb_y:ub_y, lb_z:ub_z], mirror_axes, do_mirroring,
-                        gaussian_importance_map)[0]
-
-                    if all_in_gpu:
-                        predicted_patch = predicted_patch.half()
-                    else:
-                        predicted_patch = predicted_patch.cpu().numpy()
-
-                    aggregated_results[:, lb_x:ub_x, lb_y:ub_y, lb_z:ub_z] += predicted_patch
-                    aggregated_nb_of_predictions[:, lb_x:ub_x, lb_y:ub_y, lb_z:ub_z] += add_for_nb_of_preds
-
-        # we reverse the padding here (remeber that we padded the input to be at least as large as the patch size
-        slicer = tuple(
-            [slice(0, aggregated_results.shape[i]) for i in
-             range(len(aggregated_results.shape) - (len(slicer) - 1))] + slicer[1:])
-        aggregated_results = aggregated_results[slicer]
-        aggregated_nb_of_predictions = aggregated_nb_of_predictions[slicer]
-
-        # computing the class_probabilities by dividing the aggregated result with result_numsamples
-        aggregated_results /= aggregated_nb_of_predictions
-        del aggregated_nb_of_predictions
-
-        if regions_class_order is None:
-            predicted_segmentation = aggregated_results.argmax(0)
-        else:
-            if all_in_gpu:
-                class_probabilities_here = aggregated_results.detach().cpu().numpy()
-            else:
-                class_probabilities_here = aggregated_results
-            predicted_segmentation = np.zeros(class_probabilities_here.shape[1:], dtype=np.float32)
-            for i, c in enumerate(regions_class_order):
-                predicted_segmentation[class_probabilities_here[i] > 0.5] = c
-
-        if all_in_gpu:
-            if verbose: print("copying results to CPU")
-
-            if regions_class_order is None:
-                predicted_segmentation = predicted_segmentation.detach().cpu().numpy()
-
-            aggregated_results = aggregated_results.detach().cpu().numpy()
-
-        if verbose: print("prediction done")
-        return predicted_segmentation, aggregated_results
 
     def predict_2D(self, x, do_mirroring: bool, mirror_axes: tuple = (0, 1, 2), use_sliding_window: bool = False,
                    step_size: float = 0.5, patch_size: tuple = None, regions_class_order: tuple = None,
@@ -3151,4 +2552,9 @@ class Generic_UNet(SegmentationNetwork):
                 tmp += np.prod(map_size, dtype=np.int64) * num_classes
             # print(p, map_size, num_feat, tmp)
         return tmp
+
+
+
+
+
 

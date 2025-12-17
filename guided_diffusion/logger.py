@@ -5,6 +5,7 @@ https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf97414399
 
 import os
 import sys
+import shutil
 import os.path as osp
 import json
 import time
@@ -148,39 +149,42 @@ class CSVOutputFormat(KVWriter):
 
 class TensorBoardOutputFormat(KVWriter):
     """
-    Dumps key/value pairs into TensorBoard's numeric format using PyTorch SummaryWriter.
+    Dumps key/value pairs into TensorBoard's numeric format.
     """
 
     def __init__(self, dir):
         os.makedirs(dir, exist_ok=True)
         self.dir = dir
         self.step = 1
-        try:
-            from torch.utils.tensorboard import SummaryWriter
-        except Exception as e:
-            SummaryWriter = None
-            warnings.warn(
-                f"TensorBoard logging requested but tensorboard is not available: {e}. "
-                "Install 'tensorboard' to enable it."
-            )
-        self.SummaryWriter = SummaryWriter
-        self.writer = SummaryWriter(log_dir=dir) if SummaryWriter else None
+        prefix = "events"
+        path = osp.join(osp.abspath(dir), prefix)
+        import tensorflow as tf
+        from tensorflow.python import pywrap_tensorflow
+        from tensorflow.core.util import event_pb2
+        from tensorflow.python.util import compat
+
+        self.tf = tf
+        self.event_pb2 = event_pb2
+        self.pywrap_tensorflow = pywrap_tensorflow
+        self.writer = pywrap_tensorflow.EventsWriter(compat.as_bytes(path))
 
     def writekvs(self, kvs):
-        if not self.writer:
-            return
-        for k, v in kvs.items():
-            try:
-                self.writer.add_scalar(k, float(v), self.step)
-            except Exception:
-                # Skip non-numeric entries
-                continue
-        self.writer.flush()
+        def summary_val(k, v):
+            kwargs = {"tag": k, "simple_value": float(v)}
+            return self.tf.Summary.Value(**kwargs)
+
+        summary = self.tf.Summary(value=[summary_val(k, v) for k, v in kvs.items()])
+        event = self.event_pb2.Event(wall_time=time.time(), summary=summary)
+        event.step = (
+            self.step
+        )  # is there any reason why you'd want to specify the step?
+        self.writer.WriteEvent(event)
+        self.writer.Flush()
         self.step += 1
 
     def close(self):
-        if getattr(self, "writer", None):
-            self.writer.close()
+        if self.writer:
+            self.writer.Close()
             self.writer = None
 
 

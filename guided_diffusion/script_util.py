@@ -63,9 +63,6 @@ def model_and_diffusion_defaults():
         use_new_attention_order=False,
         dpm_solver = False,
         version = 'new',
-        # New: SCTuner options
-        use_sctuner=False,
-        sctuner_embed_dim=128,
     )
     res.update(diffusion_defaults())
     return res
@@ -104,8 +101,6 @@ def create_model_and_diffusion(
     use_new_attention_order,
     dpm_solver,
     version,
-    use_sctuner,
-    sctuner_embed_dim,
 ):
     model = create_model(
         image_size,
@@ -126,8 +121,6 @@ def create_model_and_diffusion(
         use_fp16=use_fp16,
         use_new_attention_order=use_new_attention_order,
         version = version,
-        use_sctuner=use_sctuner,
-        sctuner_embed_dim=sctuner_embed_dim,
     )
     diffusion = create_gaussian_diffusion(
         steps=diffusion_steps,
@@ -162,8 +155,6 @@ def create_model(
     use_fp16=False,
     use_new_attention_order=False,
     version = 'new',
-    use_sctuner=False,
-    sctuner_embed_dim=128,
 ):
     if channel_mult == "":
         if image_size == 512:
@@ -183,11 +174,11 @@ def create_model(
     for res in attention_resolutions.split(","):
         attention_ds.append(image_size // int(res))
 
-    common_kwargs = dict(
+    return UNetModel_newpreview(
         image_size=image_size,
         in_channels=in_ch,
         model_channels=num_channels,
-        out_channels=2,
+        out_channels=2,#(3 if not learn_sigma else 6),
         num_res_blocks=num_res_blocks,
         attention_resolutions=tuple(attention_ds),
         dropout=dropout,
@@ -201,14 +192,26 @@ def create_model(
         use_scale_shift_norm=use_scale_shift_norm,
         resblock_updown=resblock_updown,
         use_new_attention_order=use_new_attention_order,
-        high_way=True,
+    ) if version == 'new' else UNetModel_v1preview(
+        image_size=image_size,
+        in_channels=in_ch,
+        model_channels=num_channels,
+        out_channels=2,#(3 if not learn_sigma else 6),
+        num_res_blocks=num_res_blocks,
+        attention_resolutions=tuple(attention_ds),
+        dropout=dropout,
+        channel_mult=channel_mult,
+        num_classes=(NUM_CLASSES if class_cond else None),
+        use_checkpoint=use_checkpoint,
+        use_fp16=use_fp16,
+        num_heads=num_heads,
+        num_head_channels=num_head_channels,
+        num_heads_upsample=num_heads_upsample,
+        use_scale_shift_norm=use_scale_shift_norm,
+        resblock_updown=resblock_updown,
+        use_new_attention_order=use_new_attention_order,
     )
-
-    if version == 'new':
-        return UNetModel_newpreview(**common_kwargs, use_sctuner=use_sctuner, sctuner_embed_dim=sctuner_embed_dim)
-    else:
-        return UNetModel_v1preview(**common_kwargs, use_sctuner=use_sctuner, sctuner_embed_dim=sctuner_embed_dim)
-
+    
 
 def create_classifier_and_diffusion(
     image_size,
@@ -348,6 +351,7 @@ def sr_create_model_and_diffusion(
         noise_schedule=noise_schedule,
         use_kl=use_kl,
         predict_xstart=predict_xstart,
+        dpm_solver = dpm_solver,
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,

@@ -2,36 +2,10 @@ import copy
 import functools
 import os
 
-try:
-    import blobfile as bf
-except Exception:
-    import os as _os
-    class _LocalBF:
-        @staticmethod
-        def join(a, b):
-            return _os.path.join(a, b)
-        @staticmethod
-        def dirname(p):
-            return _os.path.dirname(p)
-        @staticmethod
-        def exists(p):
-            return _os.path.exists(p)
-        class BlobFile:
-            def __init__(self, path, mode):
-                self.path = path
-                self.mode = mode
-                self.f = None
-            def __enter__(self):
-                self.f = open(self.path, self.mode)
-                return self.f
-            def __exit__(self, exc_type, exc, tb):
-                if self.f:
-                    self.f.close()
-    bf = _LocalBF()
-
+import blobfile as bf
 import torch as th
 import torch.distributed as dist
-from torch.nn.parallel.distributed import DistributedDataParallel as DDP
+#from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import AdamW
 
 from . import dist_util, logger
@@ -79,7 +53,7 @@ class TrainLoop:
         lr_anneal_steps=0,
     ):
         self.model = model
-        self.dataloader=dataloader
+        self.dataloader = dataloader
         self.classifier = classifier
         self.diffusion = diffusion
         self.data = data
@@ -102,25 +76,36 @@ class TrainLoop:
 
         self.step = 0
         self.resume_step = 0
-        self.epoch = 0
-        try:
-            self.steps_per_epoch = len(self.dataloader)
-        except Exception:
-            self.steps_per_epoch = None
-        self.global_batch = self.batch_size * dist.get_world_size()
 
+        # 單機單卡版本：global_batch 就是 batch_size 本身
+        self.global_batch = self.batch_size
+
+        # 有 GPU 就用 GPU，沒有就用 CPU
+        if th.cuda.is_available():
+            self.device = dist_util.dev()
+            self.model.to(self.device)
+        else:
+            self.device = th.device("cpu")
+            self.model.to(self.device)
+
+        # 是否要在一些地方做 cuda 同步（保留原本邏輯）
         self.sync_cuda = th.cuda.is_available()
 
+        # 載入權重（如果有 resume_checkpoint）
         self._load_and_sync_parameters()
+
+        # 混合精度訓練包裝
         self.mp_trainer = MixedPrecisionTrainer(
             model=self.model,
             use_fp16=self.use_fp16,
             fp16_scale_growth=fp16_scale_growth,
         )
 
+        # Optimizer
         self.opt = AdamW(
             self.mp_trainer.master_params, lr=self.lr, weight_decay=self.weight_decay
         )
+
         if self.resume_step:
             self._load_optimizer_state()
             # Model was resumed, either due to a restart or a checkpoint
@@ -134,40 +119,39 @@ class TrainLoop:
                 for _ in range(len(self.ema_rate))
             ]
 
-        if th.cuda.is_available():
-            self.use_ddp = True
-            self.ddp_model = DDP(
-                self.model,
-                device_ids=[dist_util.dev()],
-                output_device=dist_util.dev(),
-                broadcast_buffers=False,
-                bucket_cap_mb=128,
-                find_unused_parameters=False,
-            )
-        else:
-            if dist.get_world_size() > 1:
-                logger.warn(
-                    "Distributed training requires CUDA. "
-                    "Gradients will not be synchronized properly!"
-                )
-            self.use_ddp = False
-            self.ddp_model = self.model
+        # 🔴 完全關掉 DDP / 分散式，直接用單卡模型
+        self.use_ddp = False
+        self.ddp_model = self.model
+
 
     def _load_and_sync_parameters(self):
-        resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
-
-        if resume_checkpoint:
-            print('resume model')
-            self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
-            if dist.get_rank() == 0:
-                logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
-                self.model.load_part_state_dict(
-                    dist_util.load_state_dict(
-                        resume_checkpoint, map_location=dist_util.dev()
-                    )
+        """
+        單機單卡版：
+        - 如果有給 resume_checkpoint，就載入那個權重
+        - 不再呼叫 dist.get_rank() 或做 multi-process 同步
+        """
+        if self.resume_checkpoint:
+            # 如果你的檔名有 step，可以解析；沒有也沒關係，失敗就設 0
+            try:
+                self.resume_step = parse_resume_step_from_filename(
+                    self.resume_checkpoint
                 )
+            except Exception:
+                self.resume_step = 0
 
-        dist_util.sync_params(self.model.parameters())
+            logger.log(f"loading model from checkpoint: {self.resume_checkpoint}...")
+            # 用 dist_util.load_state_dict 幫你處理 CPU 載入
+            state_dict = dist_util.load_state_dict(
+                self.resume_checkpoint, map_location="cpu"
+            )
+            # 直接把權重 load 進 model
+            self.model.load_state_dict(state_dict)
+            # 再把 model 丟回正確的 device（在 __init__ 裡已經設好 self.device）
+            self.model.to(self.device)
+
+        # 單進程情境下，不需要同步參數，原本這行可以拿掉：
+        # dist_util.sync_params(self.model.parameters())
+
 
     def _load_ema_parameters(self, rate):
         ema_params = copy.deepcopy(self.mp_trainer.master_params)
@@ -211,7 +195,6 @@ class TrainLoop:
             except StopIteration:
                     # StopIteration is thrown if dataset ends
                     # reinitialize data loader
-                    self.epoch += 1
                     data_iter = iter(self.dataloader)
                     batch, cond, name = next(data_iter)
 
@@ -280,19 +263,12 @@ class TrainLoop:
             losses = losses1[0]
             sample = losses1[1]
 
-            total_loss = (losses["loss"] * weights + losses['loss_cal'] * 10).mean()
+            loss = (losses["loss"] * weights + losses['loss_cal'] * 10).mean()
 
             log_loss_dict(
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}
             )
-            # Also log the combined total loss explicitly
-            logger.logkv_mean("total_loss", total_loss.item())
-            # Log learning rate
-            try:
-                logger.logkv("lr", self.opt.param_groups[0]["lr"])
-            except Exception:
-                pass
-            self.mp_trainer.backward(total_loss)
+            self.mp_trainer.backward(loss)
             for name, param in self.ddp_model.named_parameters():
                 if param.grad is None:
                     print(name)
@@ -312,34 +288,45 @@ class TrainLoop:
 
     def log_step(self):
         logger.logkv("step", self.step + self.resume_step)
-        if self.steps_per_epoch:
-            logger.logkv("epoch", self.epoch)
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
 
     def save(self):
+        """
+        單機單卡版本的 checkpoint 存檔：
+        - 不使用 dist.get_rank()
+        - 不呼叫 dist.barrier()
+        - 直接把 model / EMA / optimizer 存到 logger 目前的目錄
+        """
         def save_checkpoint(rate, params):
+            # 把 master_params 轉回 state_dict
             state_dict = self.mp_trainer.master_params_to_state_dict(params)
-            if dist.get_rank() == 0:
-                logger.log(f"saving model {rate}...")
-                if not rate:
-                    filename = f"savedmodel{(self.step+self.resume_step):06d}.pt"
-                else:
-                    filename = f"emasavedmodel_{rate}_{(self.step+self.resume_step):06d}.pt"
-                with bf.BlobFile(bf.join(get_blob_logdir(), filename), "wb") as f:
-                    th.save(state_dict, f)
 
+            # 這裡不再判斷 rank，因為只有一個 process
+            logger.log(f"saving model {rate}...")
+            if not rate:
+                filename = f"model{(self.step + self.resume_step):06d}.pt"
+            else:
+                filename = f"ema_{rate}_{(self.step + self.resume_step):06d}.pt"
+
+            # 存到 log 目錄底下
+            with bf.BlobFile(
+                bf.join(get_blob_logdir(), filename), "wb"
+            ) as f:
+                th.save(state_dict, f)
+
+        # 存主模型
         save_checkpoint(0, self.mp_trainer.master_params)
+
+        # 存 EMA 模型
         for rate, params in zip(self.ema_rate, self.ema_params):
             save_checkpoint(rate, params)
 
-        if dist.get_rank() == 0:
-            with bf.BlobFile(
-                bf.join(get_blob_logdir(), f"optsavedmodel{(self.step+self.resume_step):06d}.pt"),
-                "wb",
-            ) as f:
-                th.save(self.opt.state_dict(), f)
-
-        dist.barrier()
+        # 存 optimizer 狀態
+        opt_filename = f"opt{(self.step + self.resume_step):06d}.pt"
+        with bf.BlobFile(
+            bf.join(get_blob_logdir(), opt_filename), "wb"
+        ) as f:
+            th.save(self.opt.state_dict(), f)
 
 
 def parse_resume_step_from_filename(filename):
