@@ -156,6 +156,7 @@ class TrainLoop:
                     if dist.get_rank() == 0:
                         logger.log(f"  Trainable: {name} ({param.numel():,} params)")
                 else:
+                    logger.log(f"  Frozen: {name} ({param.numel():,} params)")
                     param.requires_grad = False
                     frozen_count += 1
 
