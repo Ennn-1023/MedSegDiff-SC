@@ -26,7 +26,6 @@ from .nn import (
     timestep_embedding,
     layer_norm,
 )
-from .SCTuner import CSCTuner
 
 
 class AttentionPool2d(nn.Module):
@@ -735,7 +734,7 @@ class UNetModel_v1preview(nn.Module):
         self.input_blocks.apply(convert_module_to_f32)
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
-
+    
     def load_part_state_dict(self, state_dict):
 
         own_state = self.state_dict()
@@ -751,7 +750,7 @@ class UNetModel_v1preview(nn.Module):
         cu = layer_norm(c.size()[1:])(c)
         hu = layer_norm(h.size()[1:])(h)
         return cu * hu * h
-
+    
     def highway_forward(self,x, hs):
         return self.hwm(x,hs)
 
@@ -891,7 +890,7 @@ class UNetModel_newpreview(nn.Module):
         ch = model_channels
         ds = 1
         for level, mult in enumerate(channel_mult):
-
+            
             for _ in range(num_res_blocks):
                 layers = [
                     ResBlock(
@@ -1055,12 +1054,12 @@ class UNetModel_newpreview(nn.Module):
                 # backwards compatibility for serialized parameters
                 param = param.data
             own_state[name].copy_(param)
-
+    
     def enhance(self, c, h):
         cu = layer_norm(c.size()[1:])(c)
         hu = layer_norm(h.size()[1:])(h)
         return cu * hu * h
-
+    
     def highway_forward(self,x, hs = None):
         return self.hwm(x,hs = None)
 
@@ -2555,422 +2554,7 @@ class Generic_UNet(SegmentationNetwork):
         return tmp
 
 
-class UNetModel_v1sc(nn.Module):
-    """
-    The full UNet model with attention and timestep embedding.
-    :param in_channels: channels in the input Tensor.
-    :param model_channels: base channel count for the model.
-    :param out_channels: channels in the output Tensor.
-    :param num_res_blocks: number of residual blocks per downsample.
-    :param attention_resolutions: a collection of downsample rates at which
-        attention will take place. May be a set, list, or tuple.
-        For example, if this contains 4, then at 4x downsampling, attention
-        will be used.
-    :param dropout: the dropout probability.
-    :param channel_mult: channel multiplier for each level of the UNet.
-    :param conv_resample: if True, use learned convolutions for upsampling and
-        downsampling.
-    :param dims: determines if the signal is 1D, 2D, or 3D.
-    :param num_classes: if specified (as an int), then this model will be
-        class-conditional with `num_classes` classes.
-    :param use_checkpoint: use gradient checkpointing to reduce memory usage.
-    :param num_heads: the number of attention heads in each attention layer.
-    :param num_heads_channels: if specified, ignore num_heads and instead use
-                               a fixed channel width per attention head.
-    :param num_heads_upsample: works with num_heads to set a different number
-                               of heads for upsampling. Deprecated.
-    :param use_scale_shift_norm: use a FiLM-like conditioning mechanism.
-    :param resblock_updown: use residual blocks for up/downsampling.
-    :param use_new_attention_order: use a different attention pattern for potentially
-                                    increased efficiency.
-    """
-
-    def __init__(
-            self,
-            image_size,
-            in_channels,
-            model_channels,
-            out_channels,
-            num_res_blocks,
-            attention_resolutions,
-            dropout=0,
-            channel_mult=(1, 2, 4, 8),
-            conv_resample=True,
-            dims=2,
-            num_classes=None,
-            use_checkpoint=False,
-            use_fp16=False,
-            num_heads=1,
-            num_head_channels=-1,
-            num_heads_upsample=-1,
-            use_scale_shift_norm=False,
-            resblock_updown=False,
-            use_new_attention_order=False,
-            high_way=True,
-            csc_dense_hint_kernel = 3,
-
-    ):
-        super().__init__()
-
-        if num_heads_upsample == -1:
-            num_heads_upsample = num_heads
-
-        self.image_size = image_size
-        self.in_channels = in_channels
-        self.model_channels = model_channels
-        self.out_channels = out_channels
-        self.num_res_blocks = num_res_blocks
-        self.attention_resolutions = attention_resolutions
-        self.dropout = dropout
-        self.channel_mult = channel_mult
-        self.conv_resample = conv_resample
-        self.num_classes = num_classes
-        self.use_checkpoint = use_checkpoint
-        self.dtype = th.float16 if use_fp16 else th.float32
-        self.num_heads = num_heads
-        self.num_head_channels = num_head_channels
-        self.num_heads_upsample = num_heads_upsample
-
-        time_embed_dim = model_channels * 4
-        self.time_embed = nn.Sequential(
-            linear(model_channels, time_embed_dim),
-            nn.SiLU(),
-            linear(time_embed_dim, time_embed_dim),
-        )
-
-        if self.num_classes is not None:
-            self.label_emb = nn.Embedding(num_classes, time_embed_dim)
-
-        self.input_blocks = nn.ModuleList(
-            [
-                TimestepEmbedSequential(
-                    conv_nd(dims, in_channels, model_channels, 3, padding=1)
-                )
-            ]
-        )
-
-        self._feature_size = model_channels
-        input_block_chans = [model_channels]
-        ch = model_channels
-        ds = 1
-        for level, mult in enumerate(channel_mult):
-
-            for _ in range(num_res_blocks):
-                layers = [
-                    ResBlock(
-                        ch,
-                        time_embed_dim,
-                        dropout,
-                        out_channels=mult * model_channels,
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                    )
-                ]
-                ch = mult * model_channels
-                if ds in attention_resolutions:
-                    layers.append(
-                        AttentionBlock(
-                            ch,
-                            use_checkpoint=use_checkpoint,
-                            num_heads=num_heads,
-                            num_head_channels=num_head_channels,
-                            use_new_attention_order=use_new_attention_order,
-                        )
-                    )
-                self.input_blocks.append(TimestepEmbedSequential(*layers))
-                self._feature_size += ch
-                input_block_chans.append(ch)
 
 
-            if level != len(channel_mult) - 1:
-                out_ch = ch
-                self.input_blocks.append(
-                    TimestepEmbedSequential(
-                        ResBlock(
-                            ch,
-                            time_embed_dim,
-                            dropout,
-                            out_channels=out_ch,
-                            dims=dims,
-                            use_checkpoint=use_checkpoint,
-                            use_scale_shift_norm=use_scale_shift_norm,
-                            down=True,
-                        )
-                        if resblock_updown
-                        else Downsample(
-                            ch, conv_resample, dims=dims, out_channels=out_ch
-                        )
-                    )
-                )
-
-                ch = out_ch
-                input_block_chans.append(ch)
-                ds *= 2
-                self._feature_size += ch
-
-        self.middle_block = TimestepEmbedSequential(
-            ResBlock(
-                ch,
-                time_embed_dim,
-                dropout,
-                dims=dims,
-                use_checkpoint=use_checkpoint,
-                use_scale_shift_norm=use_scale_shift_norm,
-            ),
-            AttentionBlock(
-                ch,
-                use_checkpoint=use_checkpoint,
-                num_heads=num_heads,
-                num_head_channels=num_head_channels,
-                use_new_attention_order=use_new_attention_order,
-            ),
-            ResBlock(
-                ch,
-                time_embed_dim,
-                dropout,
-                dims=dims,
-                use_checkpoint=use_checkpoint,
-                use_scale_shift_norm=use_scale_shift_norm,
-            ),
-        )
-        self._feature_size += ch
-
-        # ✅ 保存 encoder 通道列表（在 decoder 构建之前）
-        self._encoder_block_chans = list(input_block_chans)  # 复制一份
-
-        self.output_blocks = nn.ModuleList([])
-        self._decoder_skip_chans = [] # record skip channels per decoder stage
-        # 使用 encoder 阶段的 input_block_chans, ch, ds（不要重新初始化）
-        for level, mult in list(enumerate(channel_mult))[::-1]:
-            for i in range(num_res_blocks + 1):
-                ich = input_block_chans.pop()
-                self._decoder_skip_chans.append(ich)
-                layers = [
-                    ResBlock(
-                        ch + ich,
-                        time_embed_dim,
-                        dropout,
-                        out_channels=model_channels * mult,
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                    )
-                ]
-                ch = model_channels * mult
-                if ds in attention_resolutions:
-                    layers.append(
-                        AttentionBlock(
-                            ch,
-                            use_checkpoint=use_checkpoint,
-                            num_heads=num_heads_upsample,
-                            num_head_channels=num_head_channels,
-                            use_new_attention_order=use_new_attention_order,
-                        )
-                    )
-                if level and i == num_res_blocks:
-                    out_ch = ch
-                    layers.append(
-                        ResBlock(
-                            ch,
-                            time_embed_dim,
-                            dropout,
-                            out_channels=out_ch,
-                            dims=dims,
-                            use_checkpoint=use_checkpoint,
-                            use_scale_shift_norm=use_scale_shift_norm,
-                            up=True,
-                        )
-                        if resblock_updown
-                        else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)
-                    )
-                    ds //= 2
-                self.output_blocks.append(TimestepEmbedSequential(*layers))
-                self._feature_size += ch
-
-        self.out = nn.Sequential(
-            normalization(ch),
-            nn.SiLU(),
-            zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
-        )
-
-        if high_way:
-            features = 32
-            self.hwm = Generic_UNet(self.in_channels - 1, features, 1, 5, highway=True)
-
-        # ==================== 创建 control_block 包装 CSCTuner ====================
-        use_csc_tuner = True
-        if use_csc_tuner:
-            # 定义内部 ControlBlock 类
-            class _CSCControlBlock(nn.Module):
-                def __init__(self, in_channels, encoder_chans, decoder_chans, channel_mult, num_res_blocks, dims, dense_hint_kernel=3, down_ratio=1.0):
-                    super().__init__()
-                    self.scale = 1.0  # 用于控制信号缩放
-
-                    pre_hint_in_channels = max(1, in_channels - 1)
-                    csc_pre_hint_out_channels = 256
-                    pre_hint_dim_ratio = 1.0
-
-                    # 1. PreHint 路径：提取全局特征（不改变空间尺寸）
-                    ch = csc_pre_hint_out_channels
-                    self.pre_hint_blocks = nn.Sequential(
-                        conv_nd(dims, pre_hint_in_channels, int(16 * pre_hint_dim_ratio), 3, padding=1),
-                        nn.SiLU(),
-                        conv_nd(dims, int(16 * pre_hint_dim_ratio), int(32 * pre_hint_dim_ratio), 3, padding=1),
-                        nn.SiLU(),
-                        conv_nd(dims, int(32 * pre_hint_dim_ratio), int(64 * pre_hint_dim_ratio), 3, padding=1),
-                        nn.SiLU(),
-                        conv_nd(dims, int(64 * pre_hint_dim_ratio), ch, 3, padding=1),
-                    )
-
-                    # 2. DenseHint 路径：为每个 encoder 阶段建立空间卷积（保持空间尺寸）
-                    self.dense_hint_blocks = nn.ModuleList()
-
-                    # 为每个 input_block 建立对应的 dense hint（不改变空间尺寸）
-                    ch_hint = csc_pre_hint_out_channels
-                    for i, chan in enumerate(encoder_chans):
-                        padding = 1 if dense_hint_kernel == 3 else 0
-                        self.dense_hint_blocks.append(
-                            nn.Sequential(
-                                nn.SiLU(),
-                                zero_module(
-                                    conv_nd(dims, ch_hint, chan, dense_hint_kernel,
-                                            padding=padding, stride=1)  # ✅ 始终 stride=1
-                                )
-                            )
-                        )
-                        ch_hint = chan
-
-                    # 3. LSCTuner 路径：为每个 decoder 的 skip connection 建立适配器
-                    from .SCTuner import SCTuner
-                    self.lsc_tuner_blocks = nn.ModuleList()
-                    self.lsc_identity = nn.ModuleList()  # ✅ 添加 Identity 用于 residual 判定
-                    for skip_chan in decoder_chans:
-                        tuner_length = int(skip_chan * down_ratio)
-                        self.lsc_tuner_blocks.append(
-                            SCTuner(dim=skip_chan, tuner_length=tuner_length)
-                        )
-                        self.lsc_identity.append(nn.Identity())
-
-            # 创建 control_block 实例
-            self.control_block = _CSCControlBlock(
-                in_channels=in_channels,
-                encoder_chans=self._encoder_block_chans,  # ✅ 使用保存的 encoder 通道列表
-                decoder_chans=self._decoder_skip_chans,
-                channel_mult=channel_mult,
-                num_res_blocks=num_res_blocks,
-                dims=dims,
-                dense_hint_kernel=csc_dense_hint_kernel,
-                down_ratio=1.0
-            )
-        else:
-            self.control_block = None
-
-    def convert_to_fp32(self):
-        """
-        Convert the torso of the model to float32.
-        """
-        self.input_blocks.apply(convert_module_to_f32)
-        self.middle_block.apply(convert_module_to_f32)
-        self.output_blocks.apply(convert_module_to_f32)
-
-    def load_part_state_dict(self, state_dict):
-
-        own_state = self.state_dict()
-        for name, param in state_dict.items():
-            if name not in own_state:
-                continue
-            if isinstance(param, th.nn.Parameter):
-                # backwards compatibility for serialized parameters
-                param = param.data
-            own_state[name].copy_(param)
-
-    def enhance(self, c, h):
-        cu = layer_norm(c.size()[1:])(c)
-        hu = layer_norm(h.size()[1:])(h)
-        return cu * hu * h
-
-    def highway_forward(self, x, hs):
-        return self.hwm(x, hs)
-
-    def forward(self, x, timesteps, y=None, control_scale=1.0, tuner_scale=1.0):
-        """
-        Apply the model to an input batch with Highway + CSCTuner.
-
-        :param x: an [N x C x ...] Tensor of inputs.
-        :param timesteps: a 1-D batch of timesteps.
-        :param y: an [N] Tensor of labels, if class-conditional.
-        :param control_scale: CSCTuner 控制强度
-        :param tuner_scale: Tuner residual 强度
-        :return: (out, cal) tuple
-        """
-        assert (y is not None) == (
-            self.num_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
-
-        hs = []
-        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-
-        if self.num_classes is not None:
-            assert y.shape == (x.shape[0],)
-            emb = emb + self.label_emb(y)
-
-        h = x.type(self.dtype)
-        c = h[:, :-1, ...]  # 控制输入（排除最后的噪声通道）
-
-        # ==================== CSCTuner：生成 DenseHint ====================
-        dense_hints = []
-        if hasattr(self, 'control_block') and self.control_block is not None:
-            hint_h = self.control_block.pre_hint_blocks(c)
-            for block in self.control_block.dense_hint_blocks:
-                hint_h = block(hint_h)
-                dense_hints.append(hint_h)
-
-        # ==================== UNet Encoder ====================
-        for ind, module in enumerate(self.input_blocks):
-            if len(emb.size()) > 2:
-                emb = emb.squeeze()
-            h = module(h, emb)
-            hs.append(h)
-
-        # ==================== Highway 机制 ====================
-        if hasattr(self, 'hwm') and self.hwm is not None:
-            uemb, cal = self.highway_forward(c, [hs[3], hs[6], hs[9], hs[12]])
-            h = h + uemb
-        else:
-            cal = None
-
-        # ==================== Middle Block ====================
-        h = self.middle_block(h, emb)
-
-        # ==================== UNet Decoder ====================
-        for m_id, module in enumerate(self.output_blocks):
-            skip_h = hs.pop()
-
-            # 使用 dense hint（如果有）
-            if dense_hints and m_id < len(dense_hints):
-                hint_feat = dense_hints[len(dense_hints) - 1 - m_id]
-                if hint_feat.shape[-2:] != skip_h.shape[-2:]:
-                    hint_feat = F.interpolate(hint_feat, size=skip_h.shape[-2:], mode='bilinear', align_corners=False)
-                skip_h = skip_h + hint_feat
-
-            # 使用 LSCTuner 调制 skip connection
-            if hasattr(self, 'control_block') and self.control_block is not None and m_id < len(self.control_block.lsc_tuner_blocks):
-                control_h = self.control_block.lsc_tuner_blocks[m_id](skip_h, x_shortcut=skip_h, use_shortcut=True)
-
-                tuner_h = self.control_block.lsc_identity[m_id](skip_h) - skip_h
-                if torch.all(torch.isclose(tuner_h, torch.zeros_like(tuner_h), atol=1e-6)):
-                    skip_h_new = skip_h + control_scale * control_h
-                else:
-                    skip_h_new = skip_h + control_scale * control_h + tuner_scale * tuner_h
-            else:
-                skip_h_new = skip_h
-
-            h = torch.cat([h, skip_h_new], dim=1)
-            h = module(h, emb)
-
-        h = h.type(x.dtype)
-        out = self.out(h)
-        return out, cal
 
 

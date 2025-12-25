@@ -18,6 +18,7 @@ from guided_diffusion import dist_util, logger
 from guided_diffusion.bratsloader import BRATSDataset, BRATSDataset3D
 from guided_diffusion.isicloader import ISICDataset
 from guided_diffusion.custom_dataset_loader import CustomDataset
+from guided_diffusion.lora import inject_lora, print_lora_parameters
 import torchvision.utils as vutils
 from guided_diffusion.utils import staple
 from guided_diffusion.script_util import (
@@ -77,10 +78,45 @@ def main():
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
     )
+    
     all_images = []
 
-
+    # 先載入 state_dict 以檢測 LoRA
     state_dict = dist_util.load_state_dict(args.model_path, map_location="cpu")
+    
+    # 檢測是否包含 LoRA
+    from guided_diffusion.lora import detect_lora_in_state_dict
+    lora_info = detect_lora_in_state_dict(state_dict)
+    
+    # 提取 LoRA 配置（如果有）
+    lora_config = state_dict.get('_lora_config', {})
+    if lora_config:
+        logger.log(f"✅ Detected LoRA config in checkpoint: {lora_config}")
+        # 從 checkpoint 中移除元數據
+        state_dict.pop('_lora_config', None)
+    
+    # 決定是否使用 LoRA
+    use_lora = args.use_lora or lora_info['has_lora']
+    
+    if use_lora:
+        # 如果命令列沒有指定 rank，嘗試從 checkpoint 自動推斷
+        lora_rank = args.lora_rank if args.lora_rank > 0 else lora_info.get('rank', 6)
+        lora_alpha = args.lora_alpha if args.lora_alpha > 0 else lora_rank
+        
+        logger.log(f"🔧 Injecting LoRA with rank={lora_rank}, alpha={lora_alpha}")
+        logger.log(f"   Auto-detected: {lora_info['has_lora']}, Manually specified: {args.use_lora}")
+        
+        model = inject_lora(
+            model,
+            rank=lora_rank,
+            alpha=lora_alpha,
+            dropout=args.lora_dropout,
+        )
+        print_lora_parameters(model)
+    else:
+        logger.log("⚠️  No LoRA detected, loading as standard model")
+    
+    # 載入權重
     from collections import OrderedDict
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
@@ -97,7 +133,13 @@ def main():
     if args.use_fp16:
         model.convert_to_fp16()
     model.eval()
-    for _ in range(len(data)):
+    
+    # 统计处理进度
+    total_samples = len(ds)
+    processed_count = 0
+    skipped_count = 0
+    
+    for idx in range(len(data)):
         b, m, path = next(data)  #should return an image from the dataloader "data"
         c = th.randn_like(b[:, :1, ...])
         img = th.cat((b, c), dim=1)     #add a noise channel$
@@ -110,6 +152,14 @@ def main():
             # For other datasets (e.g., PH2, custom datasets)
             slice_ID = os.path.splitext(os.path.basename(path[0]))[0]
 
+        # 检查是否已经处理过（检查ensemble结果文件）
+        ensemble_output = os.path.join(args.out_dir, str(slice_ID)+'_output_ens.jpg')
+        if os.path.exists(ensemble_output):
+            skipped_count += 1
+            logger.log(f"⏭️  Skipping {slice_ID} ({skipped_count} skipped, {processed_count} processed, {idx+1}/{total_samples})")
+            continue
+        
+        logger.log(f"🔄 Processing {slice_ID} ({idx+1}/{total_samples}, {processed_count} new samples)...")
         logger.log("sampling...")
 
         # ✅ Save ground truth mask for comparison
@@ -183,6 +233,13 @@ def main():
                 vutils.save_image(compose, fp = os.path.join(args.out_dir, str(slice_ID)+'_output'+str(i)+".jpg"), nrow = 1, padding = 10)
         ensres = staple(th.stack(enslist,dim=0)).squeeze(0)
         vutils.save_image(ensres, fp = os.path.join(args.out_dir, str(slice_ID)+'_output_ens'+".jpg"), nrow = 1, padding = 10)
+        
+        processed_count += 1
+        logger.log(f"✅ Completed {slice_ID} (Total processed: {processed_count})")
+    
+    logger.log(f"\n{'='*60}")
+    logger.log(f"🎉 All done! Processed: {processed_count}, Skipped: {skipped_count}, Total: {total_samples}")
+    logger.log(f"{'='*60}\n")
 
 def create_argparser():
     defaults = dict(
@@ -197,7 +254,13 @@ def create_argparser():
         gpu_dev = "0",
         out_dir='./results/',
         multi_gpu = None, #"0,1,2"
-        debug = False
+        debug = False,
+        
+        # LoRA 參數 (設為 0 表示自動檢測)
+        use_lora=False,      # 手動啟用 LoRA（優先級低於自動檢測）
+        lora_rank=0,         # 0 = 自動從 checkpoint 檢測
+        lora_alpha=0.0,      # 0 = 自動設為 rank 值
+        lora_dropout=0.0,
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

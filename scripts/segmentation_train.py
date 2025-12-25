@@ -5,6 +5,7 @@ sys.path.append("../")
 sys.path.append("./")
 from guided_diffusion import dist_util, logger
 from guided_diffusion.resample import create_named_schedule_sampler
+from guided_diffusion.lora import inject_lora, print_lora_parameters
 from guided_diffusion.bratsloader import BRATSDataset, BRATSDataset3D
 from guided_diffusion.isicloader import ISICDataset
 from guided_diffusion.custom_dataset_loader import CustomDataset,CustomDataset3D
@@ -21,13 +22,10 @@ from guided_diffusion.train_util import TrainLoop
 # viz = Visdom(port=8850)
 import torchvision.transforms as transforms
 
-import os
-os.environ["CUDA_LAUNCH_BLOCKING"]="1"
-
 def main():
     args = create_argparser().parse_args()
 
-    dist_util.setup_dist(args)
+    #dist_util.setup_dist(args)
     logger.configure(dir = args.out_dir)
 
     logger.log("creating data loader...")
@@ -44,7 +42,7 @@ def main():
 
         ds = BRATSDataset3D(args.data_dir, transform_train, test_flag=False)
         args.in_ch = 5
-    elif any(Path(args.data_dir).glob("*\*.nii.gz")):
+    elif any(Path(args.data_dir).glob("**/*.nii.gz")):
         tran_list = [transforms.Resize((args.image_size,args.image_size)),]
         transform_train = transforms.Compose(tran_list)
         print("Your current directory : ",args.data_dir)
@@ -68,6 +66,18 @@ def main():
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
     )
+    
+    # 注入 LoRA（如果啟用）
+    if args.use_lora:
+        logger.log(f"Injecting LoRA with rank={args.lora_rank}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
+        model = inject_lora(
+            model,
+            rank=args.lora_rank,
+            alpha=args.lora_alpha,
+            dropout=args.lora_dropout,
+        )
+        print_lora_parameters(model)
+    
     if args.multi_gpu:
         model = th.nn.DataParallel(model,device_ids=[int(id) for id in args.multi_gpu.split(',')])
         model.to(device = th.device('cuda', int(args.gpu_dev)))
@@ -75,7 +85,7 @@ def main():
         model.to(dist_util.dev())
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion,  maxt=args.diffusion_steps)
 
-    freeze = True if args.version == 'sc' else False
+
     logger.log("training...")
     TrainLoop(
         model=model,
@@ -95,7 +105,6 @@ def main():
         schedule_sampler=schedule_sampler,
         weight_decay=args.weight_decay,
         lr_anneal_steps=args.lr_anneal_steps,
-        freeze=freeze,
     ).run_loop()
 
 
@@ -112,12 +121,43 @@ def create_argparser():
         ema_rate="0.9999",  # comma-separated list of EMA values
         log_interval=100,
         save_interval=5000,
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
         resume_checkpoint=None, #"/results/pretrainedmodel.pt"
         use_fp16=False,
         fp16_scale_growth=1e-3,
         gpu_dev = "0",
         multi_gpu = None, #"0,1,2"
-        out_dir='./results/'
+        out_dir='./results/',
+        
+        # LoRA 參數
+        use_lora=False,
+        lora_rank=6,
+        lora_alpha=6.0,
+        lora_dropout=0.0,
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

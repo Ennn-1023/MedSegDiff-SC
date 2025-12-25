@@ -162,8 +162,9 @@ class CheckpointFunction(th.autograd.Function):
             shallow_copies = [x.view_as(x) for x in ctx.input_tensors]
             output_tensors = ctx.run_function(*shallow_copies)
         
-        # ✅ Filter out frozen parameters (requires_grad=False)
+        # 🔥 只對需要梯度的參數計算梯度（LoRA 兼容）
         trainable_params = [p for p in ctx.input_params if p.requires_grad]
+        num_input_tensors = len(ctx.input_tensors)
         
         input_grads = th.autograd.grad(
             output_tensors,
@@ -172,21 +173,21 @@ class CheckpointFunction(th.autograd.Function):
             allow_unused=True,
         )
         
-        # ✅ Reconstruct gradient tuple with None for frozen params
-        num_input_grads = len(ctx.input_tensors)
-        param_grads = input_grads[num_input_grads:]
+        # 分離輸入張量的梯度和參數的梯度
+        input_tensor_grads = input_grads[:num_input_tensors]
+        trainable_param_grads = input_grads[num_input_tensors:]
         
-        # Map gradients back to original parameter order
-        full_param_grads = []
-        grad_idx = 0
-        for p in ctx.input_params:
-            if p.requires_grad:
-                full_param_grads.append(param_grads[grad_idx])
-                grad_idx += 1
+        # 重建完整的梯度列表（為凍結參數插入 None）
+        param_grads = []
+        trainable_idx = 0
+        for param in ctx.input_params:
+            if param.requires_grad:
+                param_grads.append(trainable_param_grads[trainable_idx])
+                trainable_idx += 1
             else:
-                full_param_grads.append(None)
+                param_grads.append(None)
         
         del ctx.input_tensors
         del ctx.input_params
         del output_tensors
-        return (None, None) + tuple(input_grads[:num_input_grads]) + tuple(full_param_grads)
+        return (None, None) + input_tensor_grads + tuple(param_grads)

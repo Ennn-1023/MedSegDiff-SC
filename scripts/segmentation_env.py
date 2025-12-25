@@ -137,7 +137,6 @@ def main():
     argParser = argparse.ArgumentParser()
     argParser.add_argument("--inp_pth")
     argParser.add_argument("--out_pth")
-    argParser.add_argument("--name", default='ISIC')
     args = argParser.parse_args()
     mix_res = (0,0)
     num = 0
@@ -149,7 +148,7 @@ def main():
                 num += 1
                 ind = name.split('_')[0]
                 pred = Image.open(os.path.join(root, name)).convert('L')
-                gt_name = f"ISIC_{ind}_Segmentation.png" if args.name == 'ISIC' else f"{ind}.png"
+                gt_name = ind + ".png"
                 gt = Image.open(os.path.join(gt_path, gt_name)).convert('L')
                 pred = torchvision.transforms.PILToTensor()(pred)
                 pred = torch.unsqueeze(pred,0).float() 

@@ -39,16 +39,12 @@ def make_master_params(param_groups_and_shapes):
     """
     master_params = []
     for param_group, shape in param_groups_and_shapes:
-        # ✅ Check if ANY parameter in this group requires grad
-        any_requires_grad = any(param.requires_grad for (_, param) in param_group)
-        
         master_param = nn.Parameter(
             _flatten_dense_tensors(
                 [param.detach().float() for (_, param) in param_group]
             ).view(shape)
         )
-        # ✅ Preserve requires_grad status
-        master_param.requires_grad = any_requires_grad
+        master_param.requires_grad = True
         master_params.append(master_param)
     return master_params
 
@@ -110,22 +106,35 @@ def master_params_to_state_dict(
                 assert name in state_dict
                 state_dict[name] = unflat_master_param
     else:
+        # 🔥 LoRA 兼容：只更新可訓練參數
         state_dict = model.state_dict()
-        for i, (name, _value) in enumerate(model.named_parameters()):
-            assert name in state_dict
-            state_dict[name] = master_params[i]
+        master_param_idx = 0
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                # 只有可訓練參數才在 master_params 中
+                if master_param_idx < len(master_params):
+                    state_dict[name] = master_params[master_param_idx]
+                    master_param_idx += 1
+            # 凍結的參數保持原值（已經在 state_dict 中）
+        
     return state_dict
 
 
 def state_dict_to_master_params(model, state_dict, use_fp16):
     if use_fp16:
+        # 🔥 LoRA 兼容：只包含可訓練參數
         named_model_params = [
-            (name, state_dict[name]) for name, _ in model.named_parameters()
+            (name, state_dict[name]) for name, param in model.named_parameters() 
+            if param.requires_grad and name in state_dict
         ]
         param_groups_and_shapes = get_param_groups_and_shapes(named_model_params)
         master_params = make_master_params(param_groups_and_shapes)
     else:
-        master_params = [state_dict[name] for name, _ in model.named_parameters()]
+        # 🔥 LoRA 兼容：只包含可訓練參數
+        master_params = [
+            state_dict[name] for name, param in model.named_parameters() 
+            if param.requires_grad and name in state_dict
+        ]
     return master_params
 
 
@@ -162,14 +171,19 @@ class MixedPrecisionTrainer:
         self.use_fp16 = use_fp16
         self.fp16_scale_growth = fp16_scale_growth
 
-        self.model_params = list(self.model.parameters())
+        # 🔥 只包含需要訓練的參數（requires_grad=True）
+        self.model_params = list(p for p in self.model.parameters() if p.requires_grad)
         self.master_params = self.model_params
         self.param_groups_and_shapes = None
         self.lg_loss_scale = initial_lg_loss_scale
 
         if self.use_fp16:
+            # 只對可訓練參數創建 master params
+            trainable_named_params = [
+                (n, p) for n, p in self.model.named_parameters() if p.requires_grad
+            ]
             self.param_groups_and_shapes = get_param_groups_and_shapes(
-                self.model.named_parameters()
+                trainable_named_params
             )
             self.master_params = make_master_params(self.param_groups_and_shapes)
             self.model.convert_to_fp16()
