@@ -2896,6 +2896,7 @@ class UNetModel_v1sc(nn.Module):
     def forward(self, x, timesteps, y=None, control_scale=1.0, tuner_scale=1.0):
         """
         Apply the model to an input batch with Highway + CSCTuner.
+        VRAM 優化：Encoder + Middle Block 使用 no_grad()，Decoder 正常執行。
 
         :param x: an [N x C x ...] Tensor of inputs.
         :param timesteps: a 1-D batch of timesteps.
@@ -2908,17 +2909,42 @@ class UNetModel_v1sc(nn.Module):
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
 
-        hs = []
-        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+        # ==================== Encoder + Middle Block（凍結，節省 VRAM）====================
+        with torch.no_grad():
+            hs = []
+            emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
 
-        if self.num_classes is not None:
-            assert y.shape == (x.shape[0],)
-            emb = emb + self.label_emb(y)
+            if self.num_classes is not None:
+                assert y.shape == (x.shape[0],)
+                emb = emb + self.label_emb(y)
 
-        h = x.type(self.dtype)
-        c = h[:, :-1, ...]  # 控制输入（排除最后的噪声通道）
+            h = x.type(self.dtype)
+            c = h[:, :-1, ...]  # 控制输入（排除最后的噪声通道）
 
-        # ==================== CSCTuner：生成 DenseHint ====================
+            # UNet Encoder
+            for ind, module in enumerate(self.input_blocks):
+                if len(emb.size()) > 2:
+                    emb = emb.squeeze()
+                h = module(h, emb)
+                hs.append(h)
+
+            # Highway 机制
+            if hasattr(self, 'hwm') and self.hwm is not None:
+                uemb, cal = self.highway_forward(c, [hs[3], hs[6], hs[9], hs[12]])
+                h = h + uemb
+            else:
+                cal = None
+
+            # Middle Block
+            h = self.middle_block(h, emb)
+
+        # ==================== Detach（切斷 Encoder 計算圖）====================
+        h = h.detach()
+        hs = [feat.detach() for feat in hs]
+        emb = emb.detach()
+        c = c.detach()
+
+        # ==================== CSCTuner：生成 DenseHint（需要梯度）====================
         dense_hints = []
         if hasattr(self, 'control_block') and self.control_block is not None:
             hint_h = self.control_block.pre_hint_blocks(c)
@@ -2926,24 +2952,7 @@ class UNetModel_v1sc(nn.Module):
                 hint_h = block(hint_h)
                 dense_hints.append(hint_h)
 
-        # ==================== UNet Encoder ====================
-        for ind, module in enumerate(self.input_blocks):
-            if len(emb.size()) > 2:
-                emb = emb.squeeze()
-            h = module(h, emb)
-            hs.append(h)
-
-        # ==================== Highway 机制 ====================
-        if hasattr(self, 'hwm') and self.hwm is not None:
-            uemb, cal = self.highway_forward(c, [hs[3], hs[6], hs[9], hs[12]])
-            h = h + uemb
-        else:
-            cal = None
-
-        # ==================== Middle Block ====================
-        h = self.middle_block(h, emb)
-
-        # ==================== UNet Decoder ====================
+        # ==================== UNet Decoder（正常執行，control_block 需要梯度）====================
         for m_id, module in enumerate(self.output_blocks):
             skip_h = hs.pop()
 
