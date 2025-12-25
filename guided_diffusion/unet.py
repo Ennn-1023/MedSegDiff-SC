@@ -359,7 +359,7 @@ class AttentionBlock(nn.Module):
         self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
 
     def forward(self, x):
-        return checkpoint(self._forward, (x,), self.parameters(), True)
+        return checkpoint(self._forward, (x,), self.parameters(), self.use_checkpoint)
 
     def _forward(self, x):
         b, c, *spatial = x.shape
@@ -2555,6 +2555,125 @@ class Generic_UNet(SegmentationNetwork):
 
 
 
+# ==========================================
+# SCEdit Extension: UNetModel_v1sc
+# ==========================================
 
+# 嘗試導入 CSCTuner，如果尚未建立該檔案，請確保已建立
+try:
+    from .SCTuner import CSCTuner
+except ImportError:
+    pass # 允許暫時導入失敗，但執行時會報錯
+
+class UNetModel_v1sc(UNetModel_v1preview):
+    """
+    這是一個繼承自 UNetModel_v1preview 的 SCEdit 版本。
+    它保留了原始 MedSegDiff 的所有功能 (包括 Highway)，
+    但增加了 SC-Tuner 來編輯跳躍連接 (Skip Connections)。
+    """
+
+    def __init__(self, *args, **kwargs):
+        # 初始化父類別 (建立原本的 UNet 結構)
+        super().__init__(*args, **kwargs)
+
+        # 1. 整理 Encoder 的通道資訊 (用於初始化 Tuner)
+        # 由於父類別執行完後，self.input_blocks 已經建立，
+        # 我們需要重新遍歷一次來獲取正確的通道數列表。
+        # MedSegDiff 的 input_block_chans 邏輯比較複雜，我們這裡重新計算一次最穩妥。
+        
+        self.input_block_chans = []
+        ch = self.model_channels
+        self.input_block_chans.append(ch) # 第一個 block 的輸出
+        
+        # 模擬父類別的通道增長邏輯來重建列表
+        curr_ch = ch
+        ds = 1
+        for level, mult in enumerate(self.channel_mult):
+            for _ in range(self.num_res_blocks):
+                curr_ch = mult * self.model_channels
+                self.input_block_chans.append(curr_ch)
+            
+            if level != len(self.channel_mult) - 1:
+                # Downsample block
+                self.input_block_chans.append(curr_ch)
+                ds *= 2
+
+        # 2. 初始化 SC-Tuner
+        # Context 通道數通常是輸入通道數減去噪聲通道 (例如 4 - 1 = 3)
+        # 這裡假設最後一個 channel 是噪聲，或者是 mask
+        context_in_channels = max(1, self.in_channels - 1) 
+        
+        self.sc_tuner = CSCTuner(
+            input_block_channels=self.input_block_chans,
+            pre_hint_in_channels=context_in_channels,
+            embed_channels=128, # 可以調整
+            dims=2 # 根據你的 image_size 判斷，你的代碼預設是 dims=2
+        )
+        
+        print(f"[OK] UNetModel_v1sc Initialized with {len(self.input_block_chans)} skip connection heads.")
+
+    def forward(self, x, timesteps, y=None):
+        """
+        帶有 SCEdit 邏輯的前向傳播
+        """
+        assert (y is not None) == (
+            self.num_classes is not None
+        ), "must specify y if and only if the model is class-conditional"
+
+        hs = []
+        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+
+        if self.num_classes is not None:
+            assert y.shape == (x.shape[0],)
+            emb = emb + self.label_emb(y)
+
+        h = x.type(self.dtype)
+        
+        # [SCEdit] 提取 Context (c)
+        # 假設最後一個通道是噪聲或其他，前面的通道是原始影像/Mask
+        c = h[:, :-1, ...] 
+
+        # ================= Encoder (保持不變) =================
+        for ind, module in enumerate(self.input_blocks):
+            if len(emb.size()) > 2:
+                emb = emb.squeeze()
+            h = module(h, emb)
+            hs.append(h)
+
+        # ================= Highway (保持不變) =================
+        # MedSegDiff 特有的 Highway 機制
+        if self.hwm is not None:
+            # 確保索引不超出範圍 (MedSegDiff v1 預設邏輯)
+            uemb, cal = self.highway_forward(c, [hs[3], hs[6], hs[9], hs[12]])
+            h = h + uemb
+        else:
+            cal = None # 避免 return 報錯
+
+        # ================= Middle Block (保持不變) =================
+        h = self.middle_block(h, emb)
+
+        # ================= Decoder (加入 SCEdit) =================
+        for module in self.output_blocks:
+            # [Original]: h = th.cat([h, hs.pop()], dim=1)
+            
+            # [SCEdit Modified]:
+            skip_feat = hs.pop()
+            
+            # 計算當前 skip connection 對應的 Tuner Head 索引
+            # 因為 hs 是堆疊的，pop() 取出的是最後一個，
+            # 此時 len(hs) 正好就是剛才取出那個元素原本的 index
+            stage_idx = len(hs) 
+            
+            # 應用 Tuner
+            if self.sc_tuner is not None:
+                skip_feat = self.sc_tuner(c, skip_feat, stage_idx)
+            
+            h = th.cat([h, skip_feat], dim=1)
+            h = module(h, emb)
+
+        h = h.type(x.dtype)
+        out = self.out(h)
+        
+        return out, cal
 
 
