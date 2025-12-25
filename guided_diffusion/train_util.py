@@ -101,6 +101,7 @@ class TrainLoop:
         )
         if self.resume_step:
             self._load_optimizer_state()
+            self._prune_optimizer_state()
             # Model was resumed, either due to a restart or a checkpoint
             # being specified at the command line.
             self.ema_params = [
@@ -156,9 +157,17 @@ class TrainLoop:
                     if dist.get_rank() == 0:
                         logger.log(f"  Trainable: {name} ({param.numel():,} params)")
                 else:
-                    logger.log(f"  Frozen: {name} ({param.numel():,} params)")
+                    if dist.get_rank() == 0:
+                        logger.log(f"  Frozen: {name} ({param.numel():,} params)")
                     param.requires_grad = False
+                    # ✅ 清除已存在的梯度，釋放記憶體
+                    if param.grad is not None:
+                        param.grad = None
                     frozen_count += 1
+
+            # ✅ 強制釋放 CUDA 快取
+            if th.cuda.is_available():
+                th.cuda.empty_cache()
 
         if dist.get_rank() == 0:
             total_trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -168,6 +177,20 @@ class TrainLoop:
             logger.log(f"  Frozen layers: {frozen_count}")
             logger.log(
                 f"  Trainable params: {total_trainable_params:,} / {total_params:,} ({100 * total_trainable_params / total_params:.2f}%)")
+
+            # ✅ 顯示預估的 VRAM 節省
+            # AdamW 對每個參數需要額外 2 個 state (m, v)，每個與參數大小相同
+            # 凍結參數可節省：梯度 (1x) + optimizer state (2x) = 3x 參數大小
+            frozen_params = total_params - total_trainable_params
+            param_bytes = 4  # float32 = 4 bytes
+            saved_bytes = frozen_params * param_bytes * 3  # grad + m + v
+            saved_mb = saved_bytes / (1024 * 1024)
+            logger.log(f"  Estimated VRAM savings: ~{saved_mb:.1f} MB (gradients + optimizer states)")
+
+            if th.cuda.is_available():
+                allocated = th.cuda.memory_allocated() / (1024 * 1024)
+                reserved = th.cuda.memory_reserved() / (1024 * 1024)
+                logger.log(f"  Current CUDA memory: {allocated:.1f} MB allocated, {reserved:.1f} MB reserved")
         dist_util.sync_params(self.model.parameters())
 
     def _load_ema_parameters(self, rate):
@@ -197,6 +220,24 @@ class TrainLoop:
                 opt_checkpoint, map_location=dist_util.dev()
             )
             self.opt.load_state_dict(state_dict)
+
+    def _prune_optimizer_state(self):
+        """Remove optimizer states for params that are no longer optimized (frozen)."""
+        if not hasattr(self, "opt") or not self.opt.state:
+            return
+        keep_ids = {id(p) for group in self.opt.param_groups for p in group['params']}
+        drop_keys = [p for p in list(self.opt.state.keys()) if id(p) not in keep_ids]
+        pruned_count = len(drop_keys)
+        for p in drop_keys:
+            del self.opt.state[p]
+        # Clean up param_groups that might have been emptied
+        self.opt.param_groups = [g for g in self.opt.param_groups if len(g['params']) > 0]
+
+        if pruned_count > 0:
+            logger.log(f"Pruned {pruned_count} optimizer states for frozen params")
+            # ✅ 強制釋放 CUDA 快取
+            if th.cuda.is_available():
+                th.cuda.empty_cache()
 
     def run_loop(self):
         i = 0
