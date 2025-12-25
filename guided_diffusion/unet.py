@@ -2896,7 +2896,6 @@ class UNetModel_v1sc(nn.Module):
     def forward(self, x, timesteps, y=None, control_scale=1.0, tuner_scale=1.0):
         """
         Apply the model to an input batch with Highway + CSCTuner.
-        優化 VRAM：凍結部分使用 detach() 切斷不必要的計算圖。
 
         :param x: an [N x C x ...] Tensor of inputs.
         :param timesteps: a 1-D batch of timesteps.
@@ -2909,53 +2908,42 @@ class UNetModel_v1sc(nn.Module):
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
 
-        # ==================== Encoder 部分（凍結，使用 no_grad）====================
-        with torch.no_grad():
-            hs = []
-            emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+        hs = []
+        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
 
-            if self.num_classes is not None:
-                assert y.shape == (x.shape[0],)
-                emb = emb + self.label_emb(y)
+        if self.num_classes is not None:
+            assert y.shape == (x.shape[0],)
+            emb = emb + self.label_emb(y)
 
-            h = x.type(self.dtype)
-            c = h[:, :-1, ...]  # 控制输入（排除最后的噪声通道）
+        h = x.type(self.dtype)
+        c = h[:, :-1, ...]  # 控制输入（排除最后的噪声通道）
 
-            # UNet Encoder
-            for ind, module in enumerate(self.input_blocks):
-                if len(emb.size()) > 2:
-                    emb = emb.squeeze()
-                h = module(h, emb)
-                hs.append(h)
-
-            # Highway 机制
-            if hasattr(self, 'hwm') and self.hwm is not None:
-                uemb, cal = self.highway_forward(c, [hs[3], hs[6], hs[9], hs[12]])
-                h = h + uemb
-            else:
-                cal = None
-
-            # Middle Block
-            h = self.middle_block(h, emb)
-
-        # ==================== Detach encoder outputs ====================
-        h = h.detach()
-        hs = [h_i.detach() for h_i in hs]
-        emb = emb.detach()
-        c_detached = c.detach()
-
-        # ==================== CSCTuner：生成 DenseHint（需要梯度）====================
+        # ==================== CSCTuner：生成 DenseHint ====================
         dense_hints = []
         if hasattr(self, 'control_block') and self.control_block is not None:
-            hint_h = self.control_block.pre_hint_blocks(c_detached)
+            hint_h = self.control_block.pre_hint_blocks(c)
             for block in self.control_block.dense_hint_blocks:
                 hint_h = block(hint_h)
                 dense_hints.append(hint_h)
 
-        # ==================== Decoder ====================
-        # 收集所有來自 control_block 的貢獻，用於保持梯度流
-        control_contributions = []
+        # ==================== UNet Encoder ====================
+        for ind, module in enumerate(self.input_blocks):
+            if len(emb.size()) > 2:
+                emb = emb.squeeze()
+            h = module(h, emb)
+            hs.append(h)
 
+        # ==================== Highway 机制 ====================
+        if hasattr(self, 'hwm') and self.hwm is not None:
+            uemb, cal = self.highway_forward(c, [hs[3], hs[6], hs[9], hs[12]])
+            h = h + uemb
+        else:
+            cal = None
+
+        # ==================== Middle Block ====================
+        h = self.middle_block(h, emb)
+
+        # ==================== UNet Decoder ====================
         for m_id, module in enumerate(self.output_blocks):
             skip_h = hs.pop()
 
@@ -2965,12 +2953,10 @@ class UNetModel_v1sc(nn.Module):
                 if hint_feat.shape[-2:] != skip_h.shape[-2:]:
                     hint_feat = F.interpolate(hint_feat, size=skip_h.shape[-2:], mode='bilinear', align_corners=False)
                 skip_h = skip_h + hint_feat
-                control_contributions.append(hint_feat)
 
             # 使用 LSCTuner 调制 skip connection
             if hasattr(self, 'control_block') and self.control_block is not None and m_id < len(self.control_block.lsc_tuner_blocks):
                 control_h = self.control_block.lsc_tuner_blocks[m_id](skip_h, x_shortcut=skip_h, use_shortcut=True)
-                control_contributions.append(control_h)
 
                 tuner_h = self.control_block.lsc_identity[m_id](skip_h) - skip_h
                 if torch.all(torch.isclose(tuner_h, torch.zeros_like(tuner_h), atol=1e-6)):
@@ -2981,25 +2967,10 @@ class UNetModel_v1sc(nn.Module):
                 skip_h_new = skip_h
 
             h = torch.cat([h, skip_h_new], dim=1)
+            h = module(h, emb)
 
-            with torch.no_grad():
-                h = module(h, emb)
-            h = h.detach()
-
-        # ==================== Out 層 ====================
-        with torch.no_grad():
-            h = h.type(x.dtype)
-            out_frozen = self.out(h)
-
-        # ==================== 梯度流修復 ====================
-        # 將 control_block 的貢獻加到輸出中（乘以 0 保持值不變，但梯度可以流動）
-        if control_contributions:
-            # 計算一個與 out_frozen 形狀相同的 "梯度載體"
-            grad_carrier = sum(c.sum() for c in control_contributions) * 0
-            out = out_frozen + grad_carrier
-        else:
-            out = out_frozen
-
+        h = h.type(x.dtype)
+        out = self.out(h)
         return out, cal
 
 
