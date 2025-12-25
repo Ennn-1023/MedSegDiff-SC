@@ -117,7 +117,66 @@ class LinearWithLoRA(nn.Module):
         return self.linear(x) + self.lora(x)
 
 
-def inject_lora(model, rank=4, alpha=1.0, dropout=0.0, target_modules=None):
+class Conv1dWithLoRA(nn.Module):
+    """
+    將 LoRA 層包裝到原始 Conv1d 層的包裝器
+    
+    專門用於 UNet Attention 中的 QKV 和投影層
+    前向傳播: output = W_0 * x + LoRA(x)
+    
+    Args:
+        conv1d: 原始的 nn.Conv1d 層 (將被凍結)
+        rank: LoRA 的秩
+        alpha: LoRA 的縮放因子
+        dropout: LoRA 的 dropout 比率
+    """
+    
+    def __init__(self, conv1d, rank=4, alpha=1.0, dropout=0.0):
+        super().__init__()
+        self.conv1d = conv1d
+        
+        # 對於 1x1 卷積，可以視為 Linear 層
+        # Conv1d: (out_channels, in_channels, kernel_size)
+        # 等價於 Linear: (out_channels, in_channels) when kernel_size=1
+        assert conv1d.kernel_size == (1,), "LoRA only supports 1x1 Conv1d"
+        
+        self.lora = LoRALayer(
+            in_features=conv1d.in_channels,
+            out_features=conv1d.out_channels,
+            rank=rank,
+            alpha=alpha,
+            dropout=dropout
+        )
+        
+        # 凍結原始權重
+        self.conv1d.weight.requires_grad = False
+        if self.conv1d.bias is not None:
+            self.conv1d.bias.requires_grad = False
+    
+    def forward(self, x):
+        """
+        前向傳播: 原始 Conv1d + LoRA
+        
+        Args:
+            x: (batch, in_channels, seq_len)
+        Returns:
+            (batch, out_channels, seq_len)
+        """
+        # 原始卷積輸出
+        h = self.conv1d(x)
+        
+        # LoRA 輸出 (需要轉換維度)
+        # x: (batch, in_channels, seq_len) -> (batch, seq_len, in_channels)
+        x_permuted = x.permute(0, 2, 1)
+        # LoRA 處理: (batch, seq_len, in_channels) -> (batch, seq_len, out_channels)
+        lora_out = self.lora(x_permuted)
+        # 轉回: (batch, seq_len, out_channels) -> (batch, out_channels, seq_len)
+        lora_out = lora_out.permute(0, 2, 1)
+        
+        return h + lora_out
+
+
+def inject_lora(model, rank=4, alpha=1.0, dropout=0.0, target_modules='emb_only'):
     """
     將 LoRA 層自動注入到模型中
     
@@ -126,17 +185,37 @@ def inject_lora(model, rank=4, alpha=1.0, dropout=0.0, target_modules=None):
         rank: LoRA 的秩
         alpha: LoRA 的縮放因子
         dropout: LoRA 的 dropout 比率
-        target_modules: 要注入 LoRA 的模組名稱列表
-                       如果為 None，則默認為 ['qkv', 'proj', 'emb_layers']
+        target_modules: 要注入 LoRA 的模組策略，可選:
+                       - 'emb_only': 只注入 Embedding 層 (預設，最保守)
+                       - 'attn_only': 只注入 Attention 的 QKV 和投影層
+                       - 'attn_emb': 注入 Attention + Embedding (推薦)
+                       - 或者自定義列表: ['qkv', 'proj_out', 'emb_layers']
     
     Returns:
         注入 LoRA 後的模型
     """
-    if target_modules is None:
-        # 默認目標: Attention 的 QKV 投影、輸出投影和 Embedding 層
-        target_modules = ['qkv', 'proj', 'emb_layers']
+    # 策略映射
+    strategy_map = {
+        'emb_only': ['emb_layers'],
+        'attn_only': ['qkv', 'proj_out'],
+        'attn_emb': ['qkv', 'proj_out', 'emb_layers'],
+    }
+    
+    # 解析 target_modules
+    if isinstance(target_modules, str):
+        if target_modules in strategy_map:
+            target_modules = strategy_map[target_modules]
+            strategy_name = target_modules
+        else:
+            raise ValueError(f"Unknown strategy '{target_modules}'. Choose from: {list(strategy_map.keys())}")
+    elif isinstance(target_modules, list):
+        strategy_name = 'custom'
+    else:
+        target_modules = strategy_map['emb_only']
+        strategy_name = 'emb_only'
     
     print(f"🔍 Injecting LoRA (rank={rank}, alpha={alpha}, dropout={dropout}) into model...")
+    print(f"   Strategy: {strategy_name}")
     print(f"   Target modules: {target_modules}")
     
     # 第一階段: 收集所有需要修改的模組
@@ -146,28 +225,44 @@ def inject_lora(model, rank=4, alpha=1.0, dropout=0.0, target_modules=None):
         # 檢查是否為目標模組
         should_inject = any(target in name for target in target_modules)
         
-        if should_inject and isinstance(module, nn.Linear):
-            # 找到父模組和子模組名稱
-            parent_name = '.'.join(name.split('.')[:-1])
-            child_name = name.split('.')[-1]
-            
-            if parent_name:
-                parent_module = dict(model.named_modules())[parent_name]
-            else:
-                parent_module = model
-            
-            modules_to_modify.append((parent_module, child_name, module, name))
+        if not should_inject:
+            continue
+        
+        # 找到父模組和子模組名稱
+        parent_name = '.'.join(name.split('.')[:-1])
+        child_name = name.split('.')[-1]
+        
+        if parent_name:
+            parent_module = dict(model.named_modules())[parent_name]
+        else:
+            parent_module = model
+        
+        # 支持 Linear 和 Conv1d 層
+        if isinstance(module, nn.Linear):
+            modules_to_modify.append(('linear', parent_module, child_name, module, name))
+        elif isinstance(module, nn.Conv1d) and module.kernel_size == (1,):
+            modules_to_modify.append(('conv1d', parent_module, child_name, module, name))
     
     # 第二階段: 統一替換
     injected_count = 0
-    for parent_module, child_name, child, full_name in modules_to_modify:
-        # 用 LinearWithLoRA 包裝
-        lora_layer = LinearWithLoRA(child, rank=rank, alpha=alpha, dropout=dropout)
+    linear_count = 0
+    conv1d_count = 0
+    
+    for module_type, parent_module, child_name, child, full_name in modules_to_modify:
+        if module_type == 'linear':
+            lora_layer = LinearWithLoRA(child, rank=rank, alpha=alpha, dropout=dropout)
+            linear_count += 1
+        elif module_type == 'conv1d':
+            lora_layer = Conv1dWithLoRA(child, rank=rank, alpha=alpha, dropout=dropout)
+            conv1d_count += 1
+        
         setattr(parent_module, child_name, lora_layer)
         injected_count += 1
         print(f"   ✓ Injected LoRA into: {full_name}")
     
     print(f"✅ Successfully injected LoRA into {injected_count} layers!")
+    print(f"   - Linear layers: {linear_count}")
+    print(f"   - Conv1d layers: {conv1d_count}")
     
     # 凍結所有非 LoRA 參數
     freeze_non_lora_parameters(model)

@@ -102,8 +102,9 @@ def main():
         # 如果命令列沒有指定 rank，嘗試從 checkpoint 自動推斷
         lora_rank = args.lora_rank if args.lora_rank > 0 else lora_info.get('rank', 6)
         lora_alpha = args.lora_alpha if args.lora_alpha > 0 else lora_rank
+        lora_target = args.lora_target_modules if args.lora_target_modules else 'emb_only'
         
-        logger.log(f"🔧 Injecting LoRA with rank={lora_rank}, alpha={lora_alpha}")
+        logger.log(f"🔧 Injecting LoRA with rank={lora_rank}, alpha={lora_alpha}, target={lora_target}")
         logger.log(f"   Auto-detected: {lora_info['has_lora']}, Manually specified: {args.use_lora}")
         
         model = inject_lora(
@@ -111,6 +112,7 @@ def main():
             rank=lora_rank,
             alpha=lora_alpha,
             dropout=args.lora_dropout,
+            target_modules=lora_target,
         )
         print_lora_parameters(model)
     else:
@@ -261,6 +263,7 @@ def create_argparser():
         lora_rank=0,         # 0 = 自動從 checkpoint 檢測
         lora_alpha=0.0,      # 0 = 自動設為 rank 值
         lora_dropout=0.0,
+        lora_target_modules='emb_only',  # 'emb_only', 'attn_only', 'attn_emb'
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

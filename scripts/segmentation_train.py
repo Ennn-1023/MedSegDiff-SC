@@ -69,12 +69,13 @@ def main():
     
     # 注入 LoRA（如果啟用）
     if args.use_lora:
-        logger.log(f"Injecting LoRA with rank={args.lora_rank}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
+        logger.log(f"Injecting LoRA with rank={args.lora_rank}, alpha={args.lora_alpha}, dropout={args.lora_dropout}, target={args.lora_target_modules}")
         model = inject_lora(
             model,
             rank=args.lora_rank,
             alpha=args.lora_alpha,
             dropout=args.lora_dropout,
+            target_modules=args.lora_target_modules,
         )
         print_lora_parameters(model)
     
@@ -158,6 +159,7 @@ def create_argparser():
         lora_rank=6,
         lora_alpha=6.0,
         lora_dropout=0.0,
+        lora_target_modules='emb_only',  # 'emb_only', 'attn_only', 'attn_emb'
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
