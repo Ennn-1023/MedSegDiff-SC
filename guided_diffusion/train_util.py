@@ -144,11 +144,11 @@ class TrainLoop:
                         resume_checkpoint, map_location=dist_util.dev()
                     )
                 )
+        trainable_count = 0
+        frozen_count = 0
         if self.freeze:
             # 凍結除 control_block 之外的所有參數
             print("Freezing model parameters except control_block")
-            trainable_count = 0
-            frozen_count = 0
             for name, param in self.model.named_parameters():
                 if 'control_block' in name:
                     param.requires_grad = True
@@ -160,15 +160,14 @@ class TrainLoop:
                     param.requires_grad = False
                     frozen_count += 1
 
-            if dist.get_rank() == 0:
-                total_trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-                total_params = sum(p.numel() for p in self.model.parameters())
-                logger.log(f"Parameter summary:")
-                logger.log(f"  Trainable layers: {trainable_count}")
-                logger.log(f"  Frozen layers: {frozen_count}")
-                logger.log(
-                    f"  Trainable params: {total_trainable_params:,} / {total_params:,} ({100 * total_trainable_params / total_params:.2f}%)")
-
+        if dist.get_rank() == 0:
+            total_trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            total_params = sum(p.numel() for p in self.model.parameters())
+            logger.log(f"Parameter summary:")
+            logger.log(f"  Trainable layers: {trainable_count}")
+            logger.log(f"  Frozen layers: {frozen_count}")
+            logger.log(
+                f"  Trainable params: {total_trainable_params:,} / {total_params:,} ({100 * total_trainable_params / total_params:.2f}%)")
         dist_util.sync_params(self.model.parameters())
 
     def _load_ema_parameters(self, rate):

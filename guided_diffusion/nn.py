@@ -161,21 +161,21 @@ class CheckpointFunction(th.autograd.Function):
             # Tensors.
             shallow_copies = [x.view_as(x) for x in ctx.input_tensors]
             output_tensors = ctx.run_function(*shallow_copies)
-
+        
         # ✅ Filter out frozen parameters (requires_grad=False)
         trainable_params = [p for p in ctx.input_params if p.requires_grad]
-
+        
         input_grads = th.autograd.grad(
             output_tensors,
             ctx.input_tensors + trainable_params,
             output_grads,
             allow_unused=True,
         )
-
+        
         # ✅ Reconstruct gradient tuple with None for frozen params
         num_input_grads = len(ctx.input_tensors)
         param_grads = input_grads[num_input_grads:]
-
+        
         # Map gradients back to original parameter order
         full_param_grads = []
         grad_idx = 0
@@ -185,7 +185,7 @@ class CheckpointFunction(th.autograd.Function):
                 grad_idx += 1
             else:
                 full_param_grads.append(None)
-
+        
         del ctx.input_tensors
         del ctx.input_params
         del output_tensors
